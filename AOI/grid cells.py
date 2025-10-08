@@ -125,6 +125,7 @@ for cell_size_km in grid_sizes:
 
 ## ------------------------------------------------ VISUALIZE GRIDS WITH CONUS ------------------------------------------------
 
+print(f"\n\nLoad .gpkg files to plot...")
 # Load CONUS AOI
 aoi_gdf = gpd.read_file("conus.gpkg", layer="conus").to_crs(epsg=5070)
 aoi_geom = aoi_gdf.union_all()
