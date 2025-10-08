@@ -122,3 +122,56 @@ for cell_size_km in grid_sizes:
         print(f"❌ Error generating {grid_label} grid: {e}")
 
 #endregion
+
+## ------------------------------------------------ VISUALIZE GRIDS WITH CONUS ------------------------------------------------
+
+# Load CONUS AOI
+aoi_gdf = gpd.read_file("conus.gpkg", layer="conus").to_crs(epsg=5070)
+aoi_geom = aoi_gdf.union_all()
+
+# Load grid files
+grid_sizes = [3, 24, 54]  # km
+grids = {}
+for size in grid_sizes:
+    filename = f"grid_{size}km.gpkg"
+    grids[size] = gpd.read_file(filename)
+    print(f"Loaded {filename}: {len(grids[size])} cells, CRS: {grids[size].crs}")
+
+# Create multi-panel figure
+fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+
+for idx, size in enumerate(grid_sizes):
+    ax = axes[idx]
+
+    # Plot CONUS boundary
+    aoi_plot_gdf = gpd.GeoDataFrame([1], geometry=[aoi_geom], crs="EPSG:5070")
+    aoi_plot_gdf.boundary.plot(ax=ax, color='black', linewidth=2, label='CONUS')
+
+    # Plot grid cells
+    grids[size].boundary.plot(ax=ax, color='red', linewidth=0.5, alpha=0.7, label=f'{size}km Grid')
+
+    # Styling
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title(f"{size}km Grid\n({len(grids[size]):,} cells)", fontsize=14, fontweight='bold')
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.grid(False)
+    ax.legend(loc='lower left', frameon=False, fontsize=10)
+
+plt.tight_layout()
+plt.savefig("Grid_Cells_Overview.pdf", format="pdf", dpi=300)
+plt.show()
+
+# Print summary statistics
+print("\n" + "=" * 60)
+print("GRID SUMMARY")
+print("=" * 60)
+for size in grid_sizes:
+    grid = grids[size]
+    total_area_km2 = (len(grid) * size * size)
+    print(f"\n{size}km Grid:")
+    print(f"  • Number of cells: {len(grid):,}")
+    print(f"  • Cell area: {size}×{size} = {size ** 2} km²")
+    print(f"  • Total coverage: ~{total_area_km2:,} km²")
+    print(f"  • CRS: {grid.crs}")
