@@ -3,16 +3,17 @@ import os
 from functions import process_grid_cells_with_raster_association
 
 # ATTENTION: This works best if you pip install rtree and import into functions.py
+os.chdir("I:\Martin & Olson 2025")
 
-USE_TEST_SETTINGS = True
+USE_TEST_SETTINGS = False
 
 # Import the grids
-grid_1 = gpd.read_file('AOI/grid_1km.gpkg')
-grid_20 = gpd.read_file('AOI/grid_20km.gpkg')
-grid_40 = gpd.read_file('AOI/grid_40km.gpkg')
-grid_100 = gpd.read_file('AOI/grid_100km.gpkg')
+grid_3 = gpd.read_file('AOI/grid_3km.gpkg').to_crs(epsg=5070)
+grid_20 = gpd.read_file('AOI/grid_20km.gpkg').to_crs(epsg=5070)
+grid_40 = gpd.read_file('AOI/grid_40km.gpkg').to_crs(epsg=5070)
+grid_100 = gpd.read_file('AOI/grid_100km.gpkg').to_crs(epsg=5070)
 
-grids = [grid_100] if USE_TEST_SETTINGS else [grid_1, grid_20, grid_40]
+grids = [grid_100] if USE_TEST_SETTINGS else [grid_3, grid_20, grid_40]
 
 # Main execution
 if __name__ == "__main__":
@@ -26,7 +27,7 @@ if __name__ == "__main__":
     # Choose which grids to process
     grid_paths = (
         ["AOI/grid_100km.gpkg"] if USE_TEST_SETTINGS
-        else ["AOI/grid_1km.gpkg", "AOI/grid_20km.gpkg", "AOI/grid_40km.gpkg"]
+        else ["AOI/grid_3km.gpkg", "AOI/grid_20km.gpkg", "AOI/grid_40km.gpkg"]
     )
 
     # Process each grid size
@@ -44,8 +45,8 @@ if __name__ == "__main__":
             grid["cell_id"] = grid.index
 
         # Determine AOI size
-        if "1km" in grid_path:
-            aoi_size = "1km"
+        if "3km" in grid_path:
+            aoi_size = "3km"
         elif "20km" in grid_path:
             aoi_size = "20km"
         elif "40km" in grid_path:

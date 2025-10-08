@@ -571,6 +571,39 @@ def check_file_integrity(file_path, expected_size=None, min_size_mb=0.1):
         return False
 
 
+def reproject_raster(input_path, output_path, target_crs='EPSG:5070'):
+    """Reprojects a raster to the target CRS using Nearest Neighbor resampling."""
+    from rasterio.warp import calculate_default_transform, reproject, Resampling
+
+    try:
+        with rasterio.open(input_path) as src:
+            transform, width, height = calculate_default_transform(
+                src.crs, target_crs, src.width, src.height, *src.bounds)
+
+            kwargs = src.meta.copy()
+            kwargs.update({
+                'crs': target_crs,
+                'transform': transform,
+                'width': width,
+                'height': height,
+                'compress': 'lzw' # Good practice to add compression
+            })
+
+            with rasterio.open(output_path, 'w', **kwargs) as dst:
+                reproject(
+                    source=rasterio.band(src, 1),
+                    destination=rasterio.band(dst, 1),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs=target_crs,
+                    resampling=Resampling.nearest # Crucial for binary data
+                )
+        return True, f"Reprojected to {output_path}"
+    except Exception as e:
+        logger.error(f"Failed to reproject {input_path}: {e}")
+        return False, str(e)
+
 #endregion
 
 # RASTER PROCESSING
@@ -613,6 +646,9 @@ def build_raster_spatial_index(raster_folder):
                 bounds = src.bounds
                 # Insert bounding box into spatial index
                 idx.insert(i, (bounds.left, bounds.bottom, bounds.right, bounds.top))
+
+                raster_crs = src.crs
+                print(f"The CRS of the raster is: {raster_crs}")
 
                 # Store raster information
                 raster_info[i] = {
@@ -761,34 +797,39 @@ def create_binary_raster(input_path, output_path, threshold, nodata_value=None):
         return False, str(e)
 
 
-def conversion_worker(q, binary_dir, threshold):
+def conversion_worker(q, binary_dir, reprojected_dir, threshold):
     """
-    A worker that pulls a file path from a queue, converts it to a binary raster,
-    and deletes the original raw file upon success.
+    Pulls a file, converts to binary, reprojects it, and deletes the raw file.
     """
+    Path(binary_dir).mkdir(parents=True, exist_ok=True)
+    Path(reprojected_dir).mkdir(parents=True, exist_ok=True)
+
     while True:
         try:
             raw_path_str = q.get()
-            if raw_path_str is None:  # Sentinel value to stop the worker
+            if raw_path_str is None:
                 break
 
             raw_path = Path(raw_path_str)
-            binary_output_path = Path(binary_dir) / raw_path.name
+            binary_path = Path(binary_dir) / raw_path.name
+            reprojected_path = Path(reprojected_dir) / raw_path.name
 
-            success, message = create_binary_raster(
-                input_path=str(raw_path),
-                output_path=str(binary_output_path),
-                threshold=threshold
-            )
+            # Step 1: Create binary raster
+            success_bin, msg_bin = create_binary_raster(str(raw_path), str(binary_path), threshold)
 
-            if success:
-                try:
-                    os.remove(raw_path)
-                    logger.info(f"✓ Converted and removed raw file: {raw_path.name}")
-                except OSError as e:
-                    logger.error(f"Error removing raw file {raw_path}: {e}")
-            else:
-                logger.error(f"✗ Conversion failed for {raw_path.name}: {message}")
+            if success_bin:
+                # Step 2: Reproject the new binary raster
+                success_reproj, msg_reproj = reproject_raster(str(binary_path), str(reprojected_path))
+
+                if success_reproj:
+                    # Clean up intermediate binary file if desired
+                    os.remove(binary_path)
+
+                    # Step 3: Always remove the raw file after processing
+            os.remove(raw_path)
+
+        except Exception as e:
+            logger.error(f"Error in conversion worker for {raw_path_str}: {e}")
         finally:
             q.task_done()
 
