@@ -31,130 +31,145 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------- Functions for download meta.py -------------------------------------------
 #region
 
-def main_download_workflow(quadkeys, raw_dir="Meta CHM Raw", binary_dir="Meta CHM Binary"):
+def main_download_workflow(quadkeys,
+                       raw_dir="Meta_CHM_Raw",
+                       binary_dir="Meta_CHM_Binary",
+                       reprojected_dir="Meta_CHM_Reprojected_5070",
+                       output_dir="reports"):
     """
-    Main workflow that validates files in S3, then downloads and converts them in parallel.
-    Raw downloaded files are deleted after successful conversion.
-    """
+    Main workflow to download, convert, reproject, and verify raster data with robust tracking.
 
-    # Create S3 client
+    This function orchestrates a multi-threaded pipeline:
+    1. Validates which files exist on S3.
+    2. Checks for already processed files to avoid re-work.
+    3. Downloads raw files (EPSG:3857).
+    4. Converts raw files to binary (canopy/no canopy).
+    5. Reprojects binary files to the analysis CRS (EPSG:5070).
+    6. Verifies the integrity of the final reprojected files.
+    7. Generates a detailed report of any failures.
+    """
+    logger.info("Starting robust download and processing workflow.")
+
+    # --- Step 1: Setup S3 Client and Validate Remote Files ---
+    logger.info("Step 1: Validating file existence in S3...")
     s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED, max_pool_connections=50))
-
     bucket_name = 'dataforgood-fb-data'
     base_prefix = 'forests/v1/alsgedi_global_v6_float/chm/'
 
-    # --- Step 1: Validate that files exist in S3 ---
-    print("Step 1: Validating file existence in S3...")
-    valid_paths, invalid_paths, file_info = validate_quadkey_paths(
+    valid_paths, invalid_keys, file_info = validate_quadkey_paths(
         quadkeys, bucket_name, base_prefix, s3
     )
 
-    print(f"✓ Found {len(valid_paths)} valid files")
-    if invalid_paths:
-        print(f"✗ {len(invalid_paths)} files not found at expected locations")
-        # (Optional: Add logic here to find alternatives for missing files if needed)
+    logger.info(f"Found {len(valid_paths)} valid files on S3.")
+    if invalid_keys:
+        logger.warning(f"{len(invalid_keys)} quadkeys correspond to files not found on S3.")
 
     if not valid_paths:
-        print("❌ No valid files found to download!")
+        logger.critical("No valid files to download. Exiting workflow.")
         return
 
-    # --- Step 2: Check what's already downloaded locally ---
-    print(f"\nStep 2: Checking local files...")
-    files_to_download = []
-    already_converted = 0
-
-    # We check the FINAL destination (binary directory) to see if work is already done
+    # --- Step 2: Check Local Files and Determine Work to Be Done ---
+    logger.info("Step 2: Checking for already processed local files...")
+    files_to_process = []
+    already_done = 0
     for s3_path in valid_paths:
         key = s3_path.replace(f"s3://{bucket_name}/", "")
         quadkey = file_info[key]['quadkey']
+        final_reprojected_path = Path(reprojected_dir) / f"{quadkey}.tif"
 
-        # Check if the FINAL binary file already exists and is valid
-        final_binary_path = Path(binary_dir) / f"{quadkey}.tif"
-        if final_binary_path.exists() and final_binary_path.stat().st_size > 1024:  # Basic integrity check
-            already_converted += 1
+        # The primary check: does the FINAL, verified output already exist?
+        is_valid, _ = verify_raster(final_reprojected_path)
+        if is_valid:
+            already_done += 1
         else:
-            files_to_download.append((s3_path, key))
+            files_to_process.append((s3_path, key))
 
-    print(f"✓ {already_converted} files already converted and exist in '{binary_dir}'")
-    print(f"📥 {len(files_to_download)} files need downloading and conversion")
+    logger.info(f"{already_done} files are already fully processed and verified.")
+    logger.info(f"{len(files_to_process)} files need to be downloaded and processed.")
 
-    if not files_to_download:
-        print("✅ All files are already processed!")
+    if not files_to_process:
+        logger.info("Workflow complete. All required files are already processed.")
         return
 
-    # --- Step 3: Calculate total download size ---
-    total_size_mb = sum(file_info[key]['size_mb'] for _, key in files_to_download)
-
-    print(f"\nStep 3: Download summary")
-    print(f"Total download size: {total_size_mb:.1f} MB ({total_size_mb / 1024:.1f} GB)")
-
-    # --- Step 4: Setup directories and parallel processing ---
-    print("\nStep 4: Starting parallel download and conversion...")
+    # --- Step 3: Setup Directories and Parallel Processing ---
+    logger.info("Step 3: Preparing for parallel download and conversion...")
     Path(raw_dir).mkdir(parents=True, exist_ok=True)
     Path(binary_dir).mkdir(parents=True, exist_ok=True)
+    Path(reprojected_dir).mkdir(parents=True, exist_ok=True)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     conversion_queue = queue.Queue()
     HEIGHT_THRESHOLD = 5  # meters
+    TARGET_CRS = 'EPSG:5070'
 
-    # Define number of parallel workers for each task
+    # Lists to track failures from worker threads
+    failed_downloads = []
+    failed_conversions = []
+
     num_download_workers = 5
-    num_conversion_workers = max(1, os.cpu_count() - 1)  # Use most CPU cores for conversion
-
-    successful_downloads = 0
-    failed_downloads = 0
+    num_conversion_workers = max(1, os.cpu_count() - 1)
 
     with ThreadPoolExecutor(max_workers=num_conversion_workers, thread_name_prefix='Converter') as conversion_executor, \
             ThreadPoolExecutor(max_workers=num_download_workers, thread_name_prefix='Downloader') as download_executor:
 
-        # 1. Start the conversion workers. They will wait for items in the queue.
+        # Start conversion workers; they will wait for items from the queue.
         for _ in range(num_conversion_workers):
-            conversion_executor.submit(conversion_worker, conversion_queue, binary_dir, HEIGHT_THRESHOLD)
+            conversion_executor.submit(conversion_worker, conversion_queue, binary_dir,
+                                       reprojected_dir, HEIGHT_THRESHOLD, failed_conversions)
 
-        # 2. Submit all download tasks
-        future_to_file = {}
-        for s3_path, key in files_to_download:
-            quadkey = Path(key).stem
-            local_path = Path(raw_dir) / f"{quadkey}.tif"
-            future = download_executor.submit(
-                download_tile_boto3, s3, bucket_name, key, str(local_path)
-            )
-            future_to_file[future] = local_path
+        # Submit all download tasks.
+        future_to_key = {}
+        for s3_path, key in files_to_process:
+            local_path = Path(raw_dir) / f"{Path(key).stem}.tif"
+            future = download_executor.submit(download_tile_boto3, s3, bucket_name, key, str(local_path))
+            future_to_key[future] = key
 
-        # 3. Process downloads as they complete
-        with tqdm(total=len(files_to_download), desc="Downloading & Converting") as pbar:
-            for future in as_completed(future_to_file):
-                local_path = future_to_file[future]
+        # Process downloads as they complete.
+        with tqdm(total=len(files_to_process), desc="Downloading & Processing") as pbar:
+            for future in as_completed(future_to_key):
+                key = future_to_key[future]
                 success, message = future.result()
 
                 if success:
-                    successful_downloads += 1
-                    # Add the successfully downloaded file path to the queue for conversion
-                    conversion_queue.put(str(local_path))
+                    # On successful download, add the local file path to the conversion queue.
+                    local_path_str = message.split('(')[0].strip()  # Extract path from success message
+                    conversion_queue.put(local_path_str)
                 else:
-                    failed_downloads += 1
-                    logger.error(f"Download failed: {message}")
-
+                    failed_downloads.append((Path(key).stem, "Download failed", message))
                 pbar.update(1)
 
-        # 4. All downloads are done. Wait for the conversion queue to be empty.
-        print("\nAll downloads complete. Waiting for conversions to finish...")
+        # Wait for all conversions to finish.
+        logger.info("All downloads complete. Waiting for conversions to finish...")
         conversion_queue.join()
 
-        # 5. Signal the conversion workers to stop by sending 'None'
+        # Signal conversion workers to stop by sending 'None'.
         for _ in range(num_conversion_workers):
             conversion_queue.put(None)
 
-    # --- Step 5: Final summary ---
-    print("\n" + "=" * 60)
-    print("WORKFLOW COMPLETE")
-    print("=" * 60)
-    print(f"✅ Successful downloads: {successful_downloads}")
-    print(f"❌ Failed downloads: {failed_downloads}")
-    print(f"📁 Binary rasters saved to: {Path(binary_dir).absolute()}")
-    print(f"🧹 Raw files directory '{Path(raw_dir).absolute()}' should now be empty.")
+    # --- Step 4: Final Summary and Failure Reporting ---
+    logger.info("=" * 60)
+    logger.info("WORKFLOW COMPLETE")
+    logger.info("=" * 60)
 
-    if failed_downloads > 0:
-        print(f"\n⚠ {failed_downloads} downloads failed. Check logs for details.")
+    total_processed = len(files_to_process)
+    num_failed_downloads = len(failed_downloads)
+    num_failed_conversions = len(failed_conversions)
+    num_successful = total_processed - num_failed_downloads - num_failed_conversions
+
+    logger.info(f"Total files attempted: {total_processed}")
+    logger.info(f"✅ Successful: {num_successful}")
+    logger.info(f"❌ Failed downloads: {num_failed_downloads}")
+    logger.info(f"❌ Failed conversions/verifications: {num_failed_conversions}")
+    logger.info(f"📁 Final rasters are in: {Path(reprojected_dir).resolve()}")
+
+    if failed_downloads or failed_conversions:
+        logger.warning("Some files failed to process. Generating failure report...")
+        report_path = Path(output_dir) / "failure_report.csv"
+        failures = failed_downloads + failed_conversions
+        failure_df = pd.DataFrame(failures, columns=['quadkey', 'failure_stage', 'reason'])
+        failure_df.to_csv(report_path, index=False)
+        logger.info(f"Failure report saved to: {report_path.resolve()}")
+
 
 #endregion
 
@@ -797,42 +812,81 @@ def create_binary_raster(input_path, output_path, threshold, nodata_value=None):
         return False, str(e)
 
 
-def conversion_worker(q, binary_dir, reprojected_dir, threshold):
+def conversion_worker(q, binary_dir, reprojected_dir, threshold, failed_conversions_list):
     """
-    Pulls a file, converts to binary, reprojects it, and deletes the raw file.
+    Worker pulling from a queue to convert, reproject, verify, and clean up files.
+    This function is designed to run in a separate thread.
     """
-    Path(binary_dir).mkdir(parents=True, exist_ok=True)
-    Path(reprojected_dir).mkdir(parents=True, exist_ok=True)
-
     while True:
+        raw_path_str = q.get()
+        if raw_path_str is None:
+            break  # Sentinel value to stop the worker.
+
+        raw_path = Path(raw_path_str)
+        quadkey = raw_path.stem
+
+        # Define paths for all stages
+        binary_path = Path(binary_dir) / f"{quadkey}.tif"
+        final_reprojected_path = Path(reprojected_dir) / f"{quadkey}.tif"
+        temp_reprojected_path = Path(reprojected_dir) / f"{quadkey}_temp.tif"
+
         try:
-            raw_path_str = q.get()
-            if raw_path_str is None:
-                break
+            # Stage 1: Create Binary Raster
+            success, msg = create_binary_raster(str(raw_path), str(binary_path), threshold)
+            if not success:
+                failed_conversions_list.append((quadkey, "Binary creation", msg))
+                continue
 
-            raw_path = Path(raw_path_str)
-            binary_path = Path(binary_dir) / raw_path.name
-            reprojected_path = Path(reprojected_dir) / raw_path.name
+            # Stage 2: Reproject to a temporary file
+            success, msg = reproject_raster(str(binary_path), str(temp_reprojected_path))
+            if not success:
+                failed_conversions_list.append((quadkey, "Reprojection", msg))
+                continue
 
-            # Step 1: Create binary raster
-            success_bin, msg_bin = create_binary_raster(str(raw_path), str(binary_path), threshold)
+            # Stage 3: Verify the reprojected temporary file
+            is_valid, msg = verify_raster(temp_reprojected_path)
+            if not is_valid:
+                failed_conversions_list.append((quadkey, "Verification", msg))
+                continue
 
-            if success_bin:
-                # Step 2: Reproject the new binary raster
-                success_reproj, msg_reproj = reproject_raster(str(binary_path), str(reprojected_path))
-
-                if success_reproj:
-                    # Clean up intermediate binary file if desired
-                    os.remove(binary_path)
-
-                    # Step 3: Always remove the raw file after processing
-            os.remove(raw_path)
+            # Stage 4: If all checks pass, rename the temp file to its final name
+            os.rename(temp_reprojected_path, final_reprojected_path)
+            logger.info(f"Successfully processed and verified: {quadkey}.tif")
 
         except Exception as e:
-            logger.error(f"Error in conversion worker for {raw_path_str}: {e}")
+            failed_conversions_list.append((quadkey, "Unhandled worker exception", str(e)))
         finally:
+            # Clean up intermediate files regardless of outcome
+            if binary_path.exists():
+                os.remove(binary_path)
+            if raw_path.exists():
+                os.remove(raw_path)
+            if temp_reprojected_path.exists():
+                os.remove(temp_reprojected_path)
             q.task_done()
 
+
+def verify_raster(file_path, expected_crs='EPSG:5070'):
+    """
+    Verifies a raster for readability, correct CRS, and valid data content.
+    Returns: (is_valid: bool, message: str)
+    """
+    try:
+        p_file_path = Path(file_path)
+        if not p_file_path.exists() or p_file_path.stat().st_size < 1024:
+            return False, "File does not exist or is too small."
+
+        with rasterio.open(file_path) as src:
+            if src.crs != rasterio.crs.CRS.from_string(expected_crs):
+                return False, f"CRS mismatch. Is {src.crs}, expected {expected_crs}."
+
+            data = src.read(1, masked=True)
+            if np.ma.count(data) == 0:
+                return False, "Raster contains no valid data (all NoData)."
+
+    except Exception as e:
+        return False, f"File is corrupt or unreadable: {str(e)}"
+    return True, "File is valid."
 
 def mosaic_rasters(raster_paths, target_geometry, target_crs, target_resolution=None):
     """
