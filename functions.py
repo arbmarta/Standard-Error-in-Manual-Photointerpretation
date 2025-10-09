@@ -77,7 +77,6 @@ def main_download_workflow(quadkeys,
         quadkey = file_info[key]['quadkey']
         final_reprojected_path = Path(reprojected_dir) / f"{quadkey}.tif"
 
-        # The primary check: does the FINAL, verified output already exist?
         is_valid, _ = verify_raster(final_reprojected_path)
         if is_valid:
             already_done += 1
@@ -100,75 +99,64 @@ def main_download_workflow(quadkeys,
 
     conversion_queue = queue.Queue()
     HEIGHT_THRESHOLD = 5  # meters
-    TARGET_CRS = 'EPSG:5070'
 
-    # Lists to track failures from worker threads
     failed_downloads = []
     failed_conversions = []
 
-    num_download_workers = 5
+    num_download_workers = 10
     num_conversion_workers = max(1, os.cpu_count() - 1)
 
     with ThreadPoolExecutor(max_workers=num_conversion_workers, thread_name_prefix='Converter') as conversion_executor, \
-            ThreadPoolExecutor(max_workers=num_download_workers, thread_name_prefix='Downloader') as download_executor:
+         ThreadPoolExecutor(max_workers=num_download_workers, thread_name_prefix='Downloader') as download_executor:
 
-        # Start conversion workers; they will wait for items from the queue.
         for _ in range(num_conversion_workers):
             conversion_executor.submit(conversion_worker, conversion_queue, binary_dir,
                                        reprojected_dir, HEIGHT_THRESHOLD, failed_conversions)
 
-        # Submit all download tasks.
-        future_to_key = {}
+        future_to_path = {}
         for s3_path, key in files_to_process:
             local_path = Path(raw_dir) / f"{Path(key).stem}.tif"
             future = download_executor.submit(download_tile_boto3, s3, bucket_name, key, str(local_path))
-            future_to_key[future] = key
+            future_to_path[future] = str(local_path)
 
-        # Process downloads as they complete.
         with tqdm(total=len(files_to_process), desc="Downloading & Processing") as pbar:
-            for future in as_completed(future_to_key):
-                key = future_to_key[future]
-                success, message = future.result()
+            for future in as_completed(future_to_path):
+                # Retrieve the clean path associated with the completed future.
+                local_path_str = future_to_path[future]
+                quadkey = Path(local_path_str).stem
 
-                if success:
-                    # On successful download, add the local file path to the conversion queue.
-                    local_path_str = message.split('(')[0].strip()  # Extract path from success message
-                    conversion_queue.put(local_path_str)
-                else:
-                    failed_downloads.append((Path(key).stem, "Download failed", message))
-                pbar.update(1)
+                try:
+                    success, message = future.result()
+                    if success:
+                        # On successful download, put the verified local path on the queue.
+                        conversion_queue.put(local_path_str)
+                    else:
+                        failed_downloads.append((quadkey, "Download failed", message))
+                except Exception as exc:
+                    failed_downloads.append((quadkey, "Download exception", str(exc)))
+                finally:
+                    pbar.update(1)
 
-        # Wait for all conversions to finish.
         logger.info("All downloads complete. Waiting for conversions to finish...")
         conversion_queue.join()
 
-        # Signal conversion workers to stop by sending 'None'.
         for _ in range(num_conversion_workers):
             conversion_queue.put(None)
 
-    # --- Step 4: Final Summary and Failure Reporting ---
-    logger.info("=" * 60)
-    logger.info("WORKFLOW COMPLETE")
-    logger.info("=" * 60)
-
-    total_processed = len(files_to_process)
-    num_failed_downloads = len(failed_downloads)
-    num_failed_conversions = len(failed_conversions)
-    num_successful = total_processed - num_failed_downloads - num_failed_conversions
-
-    logger.info(f"Total files attempted: {total_processed}")
-    logger.info(f"✅ Successful: {num_successful}")
-    logger.info(f"❌ Failed downloads: {num_failed_downloads}")
-    logger.info(f"❌ Failed conversions/verifications: {num_failed_conversions}")
-    logger.info(f"📁 Final rasters are in: {Path(reprojected_dir).resolve()}")
-
-    if failed_downloads or failed_conversions:
-        logger.warning("Some files failed to process. Generating failure report...")
+    # --- Step 4: Collate and Report Failures ---
+    logger.info("Step 4: Generating failure report...")
+    all_failures = failed_downloads + failed_conversions
+    if all_failures:
         report_path = Path(output_dir) / "failure_report.csv"
-        failures = failed_downloads + failed_conversions
-        failure_df = pd.DataFrame(failures, columns=['quadkey', 'failure_stage', 'reason'])
-        failure_df.to_csv(report_path, index=False)
-        logger.info(f"Failure report saved to: {report_path.resolve()}")
+        logger.warning(f"{len(all_failures)} tasks failed. See {report_path} for details.")
+        with open(report_path, 'w') as f:
+            f.write("Quadkey,FailureStage,Reason\n")
+            for quadkey, stage, reason in all_failures:
+                f.write(f'"{quadkey}","{stage}","{reason.strip()}"\n')
+    else:
+        logger.info("All tasks completed successfully.")
+
+    logger.info("Workflow finished.")
 
 
 #endregion
@@ -601,7 +589,8 @@ def reproject_raster(input_path, output_path, target_crs='EPSG:5070'):
                 'transform': transform,
                 'width': width,
                 'height': height,
-                'compress': 'lzw' # Good practice to add compression
+                'compress': 'lzw',
+                'nbits': 1  # Ensures output is optimized for 1-bit data
             })
 
             with rasterio.open(output_path, 'w', **kwargs) as dst:

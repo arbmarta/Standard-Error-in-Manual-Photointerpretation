@@ -6,8 +6,13 @@ from botocore import UNSIGNED
 from botocore.config import Config
 
 from functions import main_download_workflow
+import os
 
-USE_TEST_SETTINGS = True  # Test this code using a low complexity, fast run by setting this value to True
+
+os.chdir("I:\Martin & Olson 2025")
+
+
+USE_TEST_SETTINGS = False  # Test this code using a low complexity, fast run by setting this value to True
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -27,11 +32,13 @@ response = s3.list_objects_v2(Bucket=Bucket, Prefix=Prefix, Delimiter='/')
 # Identify which AOI to use
 if USE_TEST_SETTINGS is False:
     with open('AOI/tiles_in_aoi.txt', "r") as f:
-        aoi = [line.strip() for line in f]
+        aoi = [line.strip().split()[-1] for line in f]
+
 
 else:
     with open('AOI/tiles_in_aoi_test.txt', "r") as f:
-        aoi = [line.strip() for line in f]
+        aoi = [line.strip().split()[-1] for line in f]
+
 
 print(f"Total number of tiles: {len(aoi)}")
 
