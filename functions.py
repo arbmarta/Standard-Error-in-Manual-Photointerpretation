@@ -28,6 +28,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+os.environ['GDAL_NUM_THREADS'] = 'ALL_CPUS'
+
+
 # ------------------------------------------- Functions for download meta.py -------------------------------------------
 #region
 
