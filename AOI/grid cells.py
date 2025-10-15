@@ -161,7 +161,6 @@ for idx, size in enumerate(grid_sizes):
     ax.legend(loc='lower left', frameon=False, fontsize=10)
 
 plt.tight_layout()
-plt.savefig("Grid_Cells_Overview.pdf", format="pdf", dpi=300)
 plt.show()
 
 # Print summary statistics
