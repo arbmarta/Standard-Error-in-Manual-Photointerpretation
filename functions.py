@@ -592,8 +592,12 @@ def reproject_raster(input_path, output_path, target_crs='EPSG:5070'):
                 'transform': transform,
                 'width': width,
                 'height': height,
+                'dtype': 'uint8',
                 'compress': 'lzw',
-                'nbits': 1  # Ensures output is optimized for 1-bit data
+                'nbits': 1,  # Ensures output is optimized for 1-bit data
+                'tiled':      True,  # Add this
+                'blockxsize': 256,
+                'blockysize': 256
             })
 
             with rasterio.open(output_path, 'w', **kwargs) as dst:
