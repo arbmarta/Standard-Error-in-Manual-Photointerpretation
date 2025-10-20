@@ -1,0 +1,17 @@
+Log In
+ssh -i ~/.ssh/id_ed USER@trillium.scinet.utoronto.ca
+
+Import
+scp -i ~/.ssh/id_ed /cygdrive/c/Users/alexj/Downloads/FILE USER@trillium.scinet.utoronto.ca:/scratch/arbmarta
+
+Get to python myenv
+source /home/USER/.virtualenvs/myenv/bin/activate
+
+Pip install
+pip install PACKAGE
+
+run
+sbatch /scratch/USER/CODE.sh
+
+queue
+squeue -u USER
