@@ -173,8 +173,10 @@ if __name__ == "__main__":
     # Load quadkeys from AOI file
     if USE_TEST_SETTINGS:
         aoi_file = 'AOI/tiles_in_aoi_test.txt'
+        output_dir = 'Meta_CHM_Raw_test'
     else:
         aoi_file = 'AOI/tiles_in_aoi.txt'
+        output_dir = 'Meta_CHM_Raw'
 
     with open(aoi_file, "r") as f:
         quadkeys = [line.strip().split()[-1] for line in f]
@@ -182,4 +184,4 @@ if __name__ == "__main__":
     logger.info(f"Loaded {len(quadkeys)} quadkeys from {aoi_file}")
 
     # Download rasters
-    download_rasters(quadkeys, output_dir="Meta_CHM_Raw", max_workers=10)
+    download_rasters(quadkeys, output_dir=output_dir, max_workers=10)
