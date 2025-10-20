@@ -59,7 +59,7 @@ def download_file_from_s3(s3_client, bucket, key, local_path, expected_size, max
     return False, f"✗ {filename}: Max retries exceeded"
 
 # Check which files exist in S3 and get their metadata.
-def check_s3_files_exist(s3_client, bucket, keys, max_workers=10):
+def check_s3_files_exist(s3_client, bucket, keys, max_workers=30):
 
     def check_single_file(key):
         try:
@@ -82,14 +82,14 @@ def check_s3_files_exist(s3_client, bucket, keys, max_workers=10):
     return results
 
 # Download raster files from S3 for given quadkeys.
-def download_rasters(quadkeys, output_dir="Meta_CHM_Raw", max_workers=10):
+def download_rasters(quadkeys, output_dir="Meta_CHM_Raw", max_workers=30):
 
     logger.info(f"Starting download of {len(quadkeys)} rasters")
 
     # Initialize S3 client
     s3_client = boto3.client(
         's3',
-        config=Config(signature_version=UNSIGNED, max_pool_connections=50)
+        config=Config(signature_version=UNSIGNED, max_pool_connections=150)
     )
 
     # Step 1: Build expected S3 keys
@@ -184,4 +184,4 @@ if __name__ == "__main__":
     logger.info(f"Loaded {len(quadkeys)} quadkeys from {aoi_file}")
 
     # Download rasters
-    download_rasters(quadkeys, output_dir=output_dir, max_workers=10)
+    download_rasters(quadkeys, output_dir=output_dir, max_workers=30)
