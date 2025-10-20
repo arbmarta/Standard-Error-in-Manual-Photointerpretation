@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------- Functions for download meta.py -------------------------------------------
+# ------------------------------------------- Functions for download_meta.py -------------------------------------------
 #region
 
 def main_download_workflow(quadkeys,

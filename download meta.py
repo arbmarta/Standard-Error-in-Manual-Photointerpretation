@@ -9,10 +9,7 @@ from functions import main_download_workflow
 import os
 
 
-os.chdir("I:\Martin & Olson 2025")
-
-
-USE_TEST_SETTINGS = False  # Test this code using a low complexity, fast run by setting this value to True
+USE_TEST_SETTINGS = True  # Test this code using a low complexity, fast run by setting this value to True
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

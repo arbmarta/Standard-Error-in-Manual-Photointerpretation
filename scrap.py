@@ -1,464 +1,172 @@
-import glob
 import logging
-import math
-import matplotlib.pyplot as plt
-import numpy as np
-import os
-from pathlib import Path
-import rasterio
-import rasterio.mask
-from shapely.geometry import Point, box
-from tqdm import tqdm
-import geopandas as gpd
-from multiprocessing import Pool, cpu_count
-from functools import partial
-import json
-import pandas as pd
+import boto3
+from botocore import UNSIGNED
+from botocore.config import Config
+from typing import List, Tuple, Set
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+
+# Check for the test tile values in the s3 bucket
+import boto3; from botocore import UNSIGNED; from botocore.config import Config; tiles = [line.strip().split()[-1] for line in open('AOI/tiles_in_aoi_test.txt')]; s3_tiles = {p['Prefix'].rstrip('/').split('/')[-1] for page in boto3.client('s3', config=Config(signature_version=UNSIGNED)).get_paginator('list_objects_v2').paginate(Bucket='dataforgood-fb-data', Prefix='forests/v1/alsgedi_global_v6_float/chm/', Delimiter='/') for p in page.get('CommonPrefixes', [])}; print(f"AOI tiles: {len(tiles)}, S3 tiles: {len(s3_tiles)}, Found: {len(set(tiles) & s3_tiles)}, Missing: {sorted(set(tiles) - s3_tiles)}")
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+USE_TEST_SETTINGS = True  # Test this code using a low complexity, fast run
 
-# ============================================
-# HPC-OPTIMIZED PARALLEL PROCESSING FUNCTIONS
-# ============================================
+# S3 Configuration
+BUCKET = 'dataforgood-fb-data'
+PREFIX = 'forests/v1/alsgedi_global_v6_float/chm/'
 
-def process_grid_cell_chunk(chunk_data, relative_points, spatial_index_path=None, raster_info_path=None):
+# Initialize S3 client
+s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED, max_pool_connections=50))
+
+
+def load_aoi_tiles(test_mode: bool = True) -> List[str]:
+    """Load tiles from AOI file"""
+    filename = 'AOI/tiles_in_aoi_test.txt' if test_mode else 'AOI/tiles_in_aoi.txt'
+
+    try:
+        with open(filename, "r") as f:
+            aoi = [line.strip().split()[-1] for line in f]
+        logger.info(f"Loaded {len(aoi)} tiles from {filename}")
+        return aoi
+    except FileNotFoundError:
+        logger.error(f"AOI file not found: {filename}")
+        return []
+
+
+def get_s3_tiles(bucket: str, prefix: str) -> Set[str]:
     """
-    Process a chunk of grid cells in parallel.
-
-    Parameters:
-    -----------
-    chunk_data : tuple
-        (chunk_index, grid_cells_subset, crs)
-    relative_points : list
-        List of (x, y) relative positions for points
-    spatial_index_path : str
-        Path to serialized spatial index (if available)
-    raster_info_path : str
-        Path to serialized raster info (if available)
+    Retrieve all available tiles from S3 bucket
 
     Returns:
-    --------
-    dict : Results containing points, grid_ids, point_ids, has_raster
+        Set of tile identifiers (quadkeys or tile names)
     """
-    chunk_idx, grid_cells, crs = chunk_data
+    logger.info(f"Fetching available tiles from s3://{bucket}/{prefix}")
 
-    # Load spatial index if provided
-    spatial_index, raster_info = None, None
-    if raster_info_path and os.path.exists(raster_info_path):
-        with open(raster_info_path, 'r') as f:
-            raster_info = json.load(f)
-        # Note: R-tree index needs special handling for multiprocessing
-        # For simplicity, we'll use the raster_info for brute force checking
+    tiles = set()
+    paginator = s3.get_paginator('list_objects_v2')
 
-    chunk_points = []
-    chunk_grid_ids = []
-    chunk_point_ids = []
-    chunk_has_raster = []
+    try:
+        # Use paginator to handle large listings
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter='/'):
+            # Get subdirectories (CommonPrefixes)
+            if 'CommonPrefixes' in page:
+                for prefix_obj in page['CommonPrefixes']:
+                    # Extract tile identifier from path
+                    tile_path = prefix_obj['Prefix']
+                    tile_id = tile_path.rstrip('/').split('/')[-1]
+                    tiles.add(tile_id)
 
-    for idx, row in grid_cells.iterrows():
-        grid_cell = row.geometry
-        grid_id = row['grid_id']
+            # Also check Contents for direct files (in case tiles are files not folders)
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    key = obj['Key']
+                    # Extract potential tile identifier from filename
+                    parts = key.replace(prefix, '').split('/')
+                    if len(parts) > 0 and parts[0]:
+                        tiles.add(parts[0])
 
-        # Check raster coverage
-        has_raster = False
-        if raster_info:
-            has_raster = check_raster_coverage_fast(grid_cell, raster_info)
+        logger.info(f"Found {len(tiles)} tiles in S3")
+        return tiles
 
-        minx, miny, maxx, maxy = grid_cell.bounds
-        cell_width = maxx - minx
-        cell_height = maxy - miny
-
-        for point_idx, (rel_x, rel_y) in enumerate(relative_points):
-            abs_x = minx + (rel_x * cell_width)
-            abs_y = miny + (rel_y * cell_height)
-            point = Point(abs_x, abs_y)
-
-            if grid_cell.contains(point) or grid_cell.intersects(point):
-                chunk_points.append(point)
-                chunk_grid_ids.append(grid_id)
-                chunk_point_ids.append(f"{grid_id}_p{point_idx}")
-                chunk_has_raster.append(has_raster)
-
-    return {
-        'points': chunk_points,
-        'grid_ids': chunk_grid_ids,
-        'point_ids': chunk_point_ids,
-        'has_raster': chunk_has_raster,
-        'chunk_idx': chunk_idx
-    }
+    except Exception as e:
+        logger.error(f"Error fetching S3 tiles: {e}")
+        return set()
 
 
-def check_raster_coverage_fast(grid_cell, raster_info):
+def verify_tiles_exist(aoi_tiles: List[str], s3_tiles: Set[str]) -> Tuple[List[str], List[str]]:
     """
-    Fast check if grid cell intersects any raster using serialized bounds.
-
-    Parameters:
-    -----------
-    grid_cell : shapely.geometry
-        Grid cell geometry
-    raster_info : dict
-        Dictionary of raster information with bounds
+    Verify which AOI tiles exist in S3
 
     Returns:
-    --------
-    bool : True if grid cell intersects any raster
+        Tuple of (existing_tiles, missing_tiles)
     """
-    cell_bounds = grid_cell.bounds
-    minx, miny, maxx, maxy = cell_bounds
+    aoi_set = set(aoi_tiles)
 
-    for raster_data in raster_info.values():
-        bounds = raster_data['bounds']
-        # Quick bounding box intersection check
-        if not (bounds['right'] < minx or bounds['left'] > maxx or
-                bounds['top'] < miny or bounds['bottom'] > maxy):
-            return True
+    existing = list(aoi_set & s3_tiles)
+    missing = list(aoi_set - s3_tiles)
 
-    return False
+    return existing, missing
 
 
-def generate_systematic_sample_points_parallel(grid_gdf, points_per_cell,
-                                               raster_folder=None,
-                                               n_workers=None,
-                                               chunk_size=100):
-    """
-    Generate systematic sample points using parallel processing.
+def print_verification_report(aoi_tiles: List[str], existing: List[str], missing: List[str]):
+    """Print detailed verification report"""
 
-    Parameters:
-    -----------
-    grid_gdf : GeoDataFrame
-        Grid cells to sample
-    points_per_cell : int
-        Number of sample points per grid cell
-    raster_folder : str, optional
-        Path to raster folder for coverage validation
-    n_workers : int, optional
-        Number of parallel workers (default: CPU count - 1)
-    chunk_size : int
-        Number of grid cells per chunk for parallel processing
+    total = len(aoi_tiles)
+    found = len(existing)
+    not_found = len(missing)
 
-    Returns:
-    --------
-    GeoDataFrame : Sample points with metadata
-    """
-    print(f"🚀 HPC MODE: GENERATING {points_per_cell:,} SYSTEMATIC SAMPLE POINTS PER GRID CELL...")
-    print(f"   Processing {len(grid_gdf):,} grid cells...")
+    print("\n" + "=" * 70)
+    print("TILE VERIFICATION REPORT")
+    print("=" * 70)
+    print(f"Total AOI tiles:     {total}")
+    print(f"Found in S3:         {found} ({100 * found / total:.1f}%)")
+    print(f"Missing from S3:     {not_found} ({100 * not_found / total:.1f}%)")
+    print("=" * 70)
 
-    # Determine number of workers
-    if n_workers is None:
-        n_workers = max(1, cpu_count() - 1)
-    print(f"   Using {n_workers} parallel workers")
+    if missing:
+        print("\nMISSING TILES:")
+        print("-" * 70)
+        for tile in sorted(missing)[:20]:  # Show first 20
+            print(f"  • {tile}")
+        if len(missing) > 20:
+            print(f"  ... and {len(missing) - 20} more")
+    else:
+        print("\n✓ All AOI tiles found in S3!")
 
-    # Calculate grid layout for points
-    n_points = points_per_cell
-    cols = int(math.ceil(math.sqrt(n_points)))
-    rows = int(math.ceil(n_points / cols))
-    print(f"   Point pattern: {rows} rows × {cols} columns")
+    if existing:
+        print("\nSAMPLE OF EXISTING TILES:")
+        print("-" * 70)
+        for tile in sorted(existing)[:10]:  # Show first 10
+            print(f"  • {tile}")
+        if len(existing) > 10:
+            print(f"  ... and {len(existing) - 10} more")
 
-    x_positions = np.linspace(0, 1, cols)
-    y_positions = np.linspace(0, 1, rows)
-
-    relative_points = []
-    point_count = 0
-    for y in y_positions:
-        for x in x_positions:
-            if point_count < n_points:
-                relative_points.append((x, y))
-                point_count += 1
-
-    print(f"   Using {len(relative_points)} points per cell")
-
-    # Build and serialize spatial index
-    raster_info_path = None
-    if raster_folder:
-        print(f"\n   Building spatial index for raster validation...")
-        raster_info = build_raster_info_dict(raster_folder)
-
-        # Save to temporary file for worker processes
-        raster_info_path = "temp_raster_info.json"
-        with open(raster_info_path, 'w') as f:
-            json.dump(raster_info, f)
-        print(f"   Saved raster info to {raster_info_path}")
-
-    # Split grid into chunks
-    n_chunks = math.ceil(len(grid_gdf) / chunk_size)
-    chunks = []
-
-    for i in range(n_chunks):
-        start_idx = i * chunk_size
-        end_idx = min((i + 1) * chunk_size, len(grid_gdf))
-        chunk_gdf = grid_gdf.iloc[start_idx:end_idx].copy()
-        chunks.append((i, chunk_gdf, grid_gdf.crs))
-
-    print(f"   Split into {n_chunks} chunks of ~{chunk_size} cells each")
-
-    # Process chunks in parallel
-    print(f"\n   Processing chunks in parallel...")
-
-    process_func = partial(
-        process_grid_cell_chunk,
-        relative_points=relative_points,
-        raster_info_path=raster_info_path
-    )
-
-    with Pool(processes=n_workers) as pool:
-        results = list(tqdm(
-            pool.imap(process_func, chunks),
-            total=n_chunks,
-            desc="Processing chunks"
-        ))
-
-    # Combine results
-    print(f"\n   Combining results from {len(results)} chunks...")
-    all_points = []
-    all_grid_ids = []
-    all_point_ids = []
-    all_has_raster = []
-
-    for result in results:
-        all_points.extend(result['points'])
-        all_grid_ids.extend(result['grid_ids'])
-        all_point_ids.extend(result['point_ids'])
-        all_has_raster.extend(result['has_raster'])
-
-    # Clean up temporary files
-    if raster_info_path and os.path.exists(raster_info_path):
-        os.remove(raster_info_path)
-
-    # Create GeoDataFrame
-    points_gdf = gpd.GeoDataFrame({
-        'point_id': all_point_ids,
-        'grid_id': all_grid_ids,
-        'sample_type': 'systematic',
-        'points_per_cell': points_per_cell,
-        'has_raster_data': all_has_raster
-    }, geometry=all_points, crs=grid_gdf.crs)
-
-    print(f"\n✅ Generated {len(points_gdf):,} total sample points")
-    print(f"   Points per cell: {len(points_gdf) / len(grid_gdf):.1f} (target: {points_per_cell})")
-    if raster_folder:
-        points_with_data = sum(all_has_raster)
-        print(f"   Points with raster data: {points_with_data:,} ({100 * points_with_data / len(points_gdf):.1f}%)")
-
-    return points_gdf
+    print("=" * 70 + "\n")
 
 
-def build_raster_info_dict(raster_folder):
-    """
-    Build a serializable dictionary of raster information.
+def main():
+    """Main verification workflow"""
 
-    Parameters:
-    -----------
-    raster_folder : str
-        Path to folder containing raster files
+    # Load AOI tiles
+    aoi_tiles = load_aoi_tiles(test_mode=USE_TEST_SETTINGS)
 
-    Returns:
-    --------
-    dict : Raster information with serializable bounds
-    """
-    raster_info = {}
-    raster_pattern = os.path.join(raster_folder, "*.tif*")
-    raster_files = glob.glob(raster_pattern)
-
-    print(f"   Building raster info for {len(raster_files)} files...")
-
-    for i, raster_path in enumerate(tqdm(raster_files, desc="Indexing rasters")):
-        try:
-            with rasterio.open(raster_path) as src:
-                bounds = src.bounds
-
-                raster_info[str(i)] = {
-                    'path': raster_path,
-                    'bounds': {
-                        'left': bounds.left,
-                        'bottom': bounds.bottom,
-                        'right': bounds.right,
-                        'top': bounds.top
-                    }
-                }
-        except Exception as e:
-            logger.warning(f"Could not index {raster_path}: {e}")
-            continue
-
-    print(f"   Indexed {len(raster_info)} rasters")
-    return raster_info
-
-
-# ============================================
-# ARRAY JOB SUPPORT FOR HPC CLUSTERS
-# ============================================
-
-def save_grid_chunks_for_array_jobs(grid_gdf, output_dir, chunks_per_job=50):
-    """
-    Save grid chunks for SLURM/PBS array jobs.
-
-    Parameters:
-    -----------
-    grid_gdf : GeoDataFrame
-        Grid to split into chunks
-    output_dir : str
-        Directory to save chunks
-    chunks_per_job : int
-        Number of grid cells per job
-
-    Returns:
-    --------
-    int : Number of array jobs needed
-    """
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    n_jobs = math.ceil(len(grid_gdf) / chunks_per_job)
-
-    for job_id in range(n_jobs):
-        start_idx = job_id * chunks_per_job
-        end_idx = min((job_id + 1) * chunks_per_job, len(grid_gdf))
-
-        chunk_gdf = grid_gdf.iloc[start_idx:end_idx].copy()
-        chunk_file = output_path / f"grid_chunk_{job_id:04d}.gpkg"
-        chunk_gdf.to_file(chunk_file, driver="GPKG")
-
-    print(f"✅ Saved {n_jobs} grid chunks to {output_dir}")
-    print(f"   Each chunk contains ~{chunks_per_job} grid cells")
-    print(f"\nTo run as array job:")
-    print(f"   #SBATCH --array=0-{n_jobs - 1}")
-    print(f"   python process_chunk.py --chunk-id $SLURM_ARRAY_TASK_ID")
-
-    return n_jobs
-
-
-def process_single_chunk_for_array_job(chunk_id, chunks_dir, output_dir,
-                                       points_per_cell, raster_folder=None):
-    """
-    Process a single chunk (for use in array jobs).
-
-    Parameters:
-    -----------
-    chunk_id : int
-        Array job task ID
-    chunks_dir : str
-        Directory containing grid chunks
-    output_dir : str
-        Directory to save results
-    points_per_cell : int
-        Number of points per grid cell
-    raster_folder : str, optional
-        Path to raster folder
-    """
-    chunk_file = Path(chunks_dir) / f"grid_chunk_{chunk_id:04d}.gpkg"
-
-    if not chunk_file.exists():
-        logger.error(f"Chunk file not found: {chunk_file}")
+    if not aoi_tiles:
+        logger.error("No tiles loaded from AOI file. Exiting.")
         return
 
-    print(f"Processing chunk {chunk_id}: {chunk_file}")
-    grid_chunk = gpd.read_file(chunk_file)
+    # Get available tiles from S3
+    s3_tiles = get_s3_tiles(BUCKET, PREFIX)
 
-    # Process this chunk (single-threaded, as parallelism is at job level)
-    points = generate_systematic_sample_points_parallel(
-        grid_chunk,
-        points_per_cell=points_per_cell,
-        raster_folder=raster_folder,
-        n_workers=1  # Single worker per array job
-    )
+    if not s3_tiles:
+        logger.error("No tiles found in S3. Check bucket/prefix configuration.")
+        return
+
+    # Verify tile existence
+    existing, missing = verify_tiles_exist(aoi_tiles, s3_tiles)
+
+    # Print report
+    print_verification_report(aoi_tiles, existing, missing)
 
     # Save results
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    output_file = output_path / f"points_chunk_{chunk_id:04d}.gpkg"
-    points.to_file(output_file, driver="GPKG")
+    if missing:
+        output_file = 'missing_tiles.txt'
+        with open(output_file, 'w') as f:
+            f.write('\n'.join(sorted(missing)))
+        logger.info(f"Missing tiles saved to {output_file}")
 
-    print(f"✅ Saved {len(points)} points to {output_file}")
+    return existing, missing
 
-
-def merge_chunk_results(chunks_dir, output_file):
-    """
-    Merge results from array jobs.
-
-    Parameters:
-    -----------
-    chunks_dir : str
-        Directory containing chunk results
-    output_file : str
-        Output file path for merged results
-    """
-    chunk_pattern = os.path.join(chunks_dir, "points_chunk_*.gpkg")
-    chunk_files = sorted(glob.glob(chunk_pattern))
-
-    print(f"Merging {len(chunk_files)} chunk results...")
-
-    all_points = []
-    for chunk_file in tqdm(chunk_files, desc="Loading chunks"):
-        chunk_gdf = gpd.read_file(chunk_file)
-        all_points.append(chunk_gdf)
-
-    merged = gpd.GeoDataFrame(pd.concat(all_points, ignore_index=True))
-    merged.to_file(output_file, driver="GPKG")
-
-    print(f"✅ Merged {len(merged)} points to {output_file}")
-    return merged
-
-
-# ============================================
-# USAGE
-# ============================================
 
 if __name__ == "__main__":
-    import argparse
+    existing_tiles, missing_tiles = main()
 
-    parser = argparse.ArgumentParser(description="HPC-optimized sample point generation")
-    parser.add_argument("--mode", choices=["parallel", "array-prep", "array-process", "array-merge"],
-                        default="parallel", help="Processing mode")
-    parser.add_argument("--grid-file", default="AOI/grid_10km.gpkg")
-    parser.add_argument("--raster-folder", default="Meta CHM Binary")
-    parser.add_argument("--points-per-cell", type=int, default=10)
-    parser.add_argument("--n-workers", type=int, default=None)
-    parser.add_argument("--chunk-size", type=int, default=100)
-    parser.add_argument("--chunk-id", type=int, default=None)
-    parser.add_argument("--chunks-dir", default="grid_chunks")
-    parser.add_argument("--output-dir", default="results")
-    parser.add_argument("--output-file", default="sample_points_10km.gpkg")
-
-    args = parser.parse_args()
-
-    if args.mode == "parallel":
-        # Standard parallel processing on single node
-        grid_gdf = gpd.read_file(args.grid_file)
-        sample_points = generate_systematic_sample_points_parallel(
-            grid_gdf,
-            points_per_cell=args.points_per_cell,
-            raster_folder=args.raster_folder,
-            n_workers=args.n_workers,
-            chunk_size=args.chunk_size
-        )
-        sample_points.to_file(args.output_file, driver="GPKG")
-        print(f"\n✅ Saved {len(sample_points)} points to {args.output_file}")
-
-    elif args.mode == "array-prep":
-        # Prepare chunks for array jobs
-        grid_gdf = gpd.read_file(args.grid_file)
-        save_grid_chunks_for_array_jobs(
-            grid_gdf,
-            output_dir=args.chunks_dir,
-            chunks_per_job=args.chunk_size
-        )
-
-    elif args.mode == "array-process":
-        # Process single chunk (called by array job)
-        if args.chunk_id is None:
-            raise ValueError("--chunk-id required for array-process mode")
-        process_single_chunk_for_array_job(
-            args.chunk_id,
-            chunks_dir=args.chunks_dir,
-            output_dir=args.output_dir,
-            points_per_cell=args.points_per_cell,
-            raster_folder=args.raster_folder
-        )
-
-    elif args.mode == "array-merge":
-        # Merge results from array jobs
-        merge_chunk_results(args.output_dir, args.output_file)
+    # Only proceed with download if all tiles exist
+    if not missing_tiles:
+        logger.info("All tiles verified. Ready to proceed with download.")
+        # Uncomment to run download workflow:
+        # from functions import main_download_workflow
+        # main_download_workflow(existing_tiles)
+    else:
+        logger.warning(f"{len(missing_tiles)} tiles not found. Review before proceeding.")
