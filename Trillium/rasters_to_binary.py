@@ -144,11 +144,11 @@ def convert_all_rasters(input_dir, output_dir, max_workers=192):
 if __name__ == "__main__":
     # Set directories based on test mode
     if USE_TEST_SETTINGS:
-        input_dir = "Meta_CHM_Raw_test"
-        output_dir = "Meta_CHM_Binary_test"
+        input_dir = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Raw_test"
+        output_dir = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Binary_test"
     else:
-        input_dir = "Meta_CHM_Raw"
-        output_dir = "Meta_CHM_Binary"
+        input_dir = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Raw"
+        output_dir = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Binary"
 
     logger.info(f"USE_TEST_SETTINGS = {USE_TEST_SETTINGS}")
     logger.info(f"Input directory: {input_dir}")
