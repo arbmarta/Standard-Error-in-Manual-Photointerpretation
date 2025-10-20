@@ -14,7 +14,7 @@ from tqdm import tqdm
 bucket_name = 'dataforgood-fb-data'
 key = 'forests/v1/alsgedi_global_v6_float/tiles.geojson'
 local_file = 'tiles.geojson'
-reprojected_file = 'tiles_us_albers.geojson'
+reprojected_file = 'tiles_us_wgs84.geojson'
 aoi_filtered_file = 'tiles_in_aoi.geojson'
 
 # Initialize unsigned S3 client
@@ -29,11 +29,11 @@ else:
     print(f"Using existing {local_file}")
 
 # Load AOI
-aoi_gdf = gpd.read_file("conus.gpkg", layer="conus").to_crs(epsg=5070)
+aoi_gdf = gpd.read_file("conus.gpkg", layer="conus").to_crs(epsg=3857)
 aoi_geom = aoi_gdf.union_all()  # dissolve to single polygon
 
 # Reproject tiles directly
-tiles = gpd.read_file(local_file).to_crs(epsg=5070)
+tiles = gpd.read_file(local_file).to_crs(epsg=3857)
 
 # Spatial filter: tiles fully within AOI
 tiles_in_aoi = tiles[tiles.within(aoi_geom)]
@@ -78,7 +78,7 @@ plt.show()
 #region
 
 # Load AOI-filtered tiles
-tiles_in_aoi = gpd.read_file("tiles_in_aoi.geojson").to_crs(epsg=5070)
+tiles_in_aoi = gpd.read_file("tiles_in_aoi.geojson").to_crs(epsg=3857)
 
 # Merge all polygons to one big AOI polygon
 aoi_union = tiles_in_aoi.union_all()
@@ -104,13 +104,13 @@ for cell_size_km in grid_sizes:
                 if aoi_union.contains(cell):
                     cells.append(cell)
 
-        grid_gdf = gpd.GeoDataFrame(geometry=cells, crs="EPSG:5070")
+        grid_gdf = gpd.GeoDataFrame(geometry=cells, crs="EPSG:3857")
 
         # Create GeoDataFrame with explicit cell_id
         grid_gdf = gpd.GeoDataFrame(
             {"cell_id": range(1, len(cells)+1)},
             geometry=cells,
-            crs="EPSG:5070"
+            crs="EPSG:3857"
         )
 
         # Save as GeoPackage
@@ -127,7 +127,7 @@ for cell_size_km in grid_sizes:
 
 print(f"\n\nLoad .gpkg files to plot...")
 # Load CONUS AOI
-aoi_gdf = gpd.read_file("conus.gpkg", layer="conus").to_crs(epsg=5070)
+aoi_gdf = gpd.read_file("conus.gpkg", layer="conus").to_crs(epsg=3857)
 aoi_geom = aoi_gdf.union_all()
 
 # Load grid files
@@ -145,7 +145,7 @@ for idx, size in enumerate(grid_sizes):
     ax = axes[idx]
 
     # Plot CONUS boundary
-    aoi_plot_gdf = gpd.GeoDataFrame([1], geometry=[aoi_geom], crs="EPSG:5070")
+    aoi_plot_gdf = gpd.GeoDataFrame([1], geometry=[aoi_geom], crs="EPSG:3857")
     aoi_plot_gdf.boundary.plot(ax=ax, color='black', linewidth=2, label='CONUS')
 
     # Plot grid cells
