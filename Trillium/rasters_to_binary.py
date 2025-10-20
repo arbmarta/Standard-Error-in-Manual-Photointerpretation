@@ -1,6 +1,6 @@
 # For use on Trillium HPC - Convert CHM rasters to 1-bit binary
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import logging
 import numpy as np
 from pathlib import Path
@@ -64,7 +64,7 @@ def convert_to_binary(input_path, output_path):
         return False, f"✗ {filename}: {str(e)}"
 
 
-def convert_all_rasters(input_dir, output_dir, max_workers=10):
+def convert_all_rasters(input_dir, output_dir, max_workers=192):
     """
     Convert all .tif files in input_dir to binary format in output_dir
     """
@@ -106,7 +106,7 @@ def convert_all_rasters(input_dir, output_dir, max_workers=10):
     successful = 0
     failed = []
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(convert_to_binary, str(input_file), str(output_file)): (input_file, output_file)
             for input_file, output_file in files_to_process
@@ -155,4 +155,4 @@ if __name__ == "__main__":
     logger.info(f"Output directory: {output_dir}")
 
     # Run conversion
-    convert_all_rasters(input_dir, output_dir, max_workers=10)
+    convert_all_rasters(input_dir, output_dir, max_workers=192)
