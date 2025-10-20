@@ -1,6 +1,9 @@
 # Change Log for master branch
 
-October 20: AOI scripts updated to use EPSG 3857, matching the Meta tiles.
+October 20: 
+1. AOI scripts updated to use EPSG 3857, matching the Meta tiles.
+2. download_meta.py and rasters_to_binary.py optimized for running on Trillium HPC
+3. Meta CHMs successfully downloaded using 
 
 # Notes between Lukas and Alex
 The Meta dataset uses the CRS EPSG 3857.
