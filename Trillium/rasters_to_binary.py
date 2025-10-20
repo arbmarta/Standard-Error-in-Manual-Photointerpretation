@@ -39,12 +39,11 @@ def convert_to_binary(input_path, output_path):
             if source_nodata is not None:
                 binary_data[data == source_nodata] = source_nodata
 
-            # Update metadata for 1-bit binary output
+            # Update metadata for 1-bit binary output (no compression)
             meta.update({
                 'dtype': 'uint8',
                 'count': 1,
-                'compress': 'lzw',
-                'nbits': 1  # Optimizes storage for 1-bit data
+                'nbits': 1  # 1-bit optimization without compression
             })
 
             # Create output directory if needed
@@ -64,7 +63,7 @@ def convert_to_binary(input_path, output_path):
         return False, f"✗ {filename}: {str(e)}"
 
 
-def convert_all_rasters(input_dir, output_dir, max_workers=192):
+def convert_all_rasters(input_dir, output_dir, max_workers=64):
     """
     Convert all .tif files in input_dir to binary format in output_dir
     """
@@ -87,7 +86,7 @@ def convert_all_rasters(input_dir, output_dir, max_workers=192):
     for input_file in tif_files:
         output_file = Path(output_dir) / input_file.name
 
-        if output_file.exists() and output_file.stat().st_size > 1024:
+        if output_file.exists():
             already_done += 1
         else:
             files_to_process.append((input_file, output_file))
@@ -155,4 +154,4 @@ if __name__ == "__main__":
     logger.info(f"Output directory: {output_dir}")
 
     # Run conversion
-    convert_all_rasters(input_dir, output_dir, max_workers=192)
+    convert_all_rasters(input_dir, output_dir, max_workers=64)
