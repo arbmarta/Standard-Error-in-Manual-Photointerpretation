@@ -1,4 +1,4 @@
-# For use on Trillium HPC datamover nodes
+# Designed for use on Trillium HPC datamover nodes
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import boto3
