@@ -13,8 +13,8 @@ conus = states[~states['STUSPS'].isin(['AK', 'HI', 'PR', 'GU', 'VI', 'MP', 'AS']
 # Merge all states into a single polygon
 conus = gpd.GeoDataFrame(geometry=[unary_union(conus.geometry)], crs=conus.crs)
 
-# Reproject to Albers Equal Area (meters)
-conus = conus.to_crs(epsg=5070)
+# Reproject to WGS 84
+conus = conus.to_crs(epsg=3857)
 
 # Save merged polygon to GeoPackage
 conus.to_file("conus.gpkg", layer="conus", driver="GPKG")

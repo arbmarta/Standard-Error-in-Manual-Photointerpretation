@@ -1,4 +1,6 @@
 # Notes between Lukas and Alex
+The Meta dataset uses the CRS EPSG 3857.
+
 The AOI folder is done. Download and save to PyCharm project. Needs to run grid_generator.py to create the grid_3km.gpkg as it is 200 MB.
 
 Next steps:
