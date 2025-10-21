@@ -10,6 +10,12 @@ source /home/USER/.virtualenvs/myenv/bin/activate
 Pip install
 pip install PACKAGE
 
+List packages
+pip list
+
+Leave python myenv
+deactivate
+
 run
 sbatch /scratch/USER/CODE.sh
 
