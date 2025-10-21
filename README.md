@@ -2,7 +2,7 @@
 
 October 21:
 1. rasters_to_binary.py updated for use on Trillium HPC with reduced I/O demand. Decreased max_workers from 64 to 16.
-2. rasters_to_binary.py changed to remove compression. Total size of project on scratch ~2.2 TB
+2. rasters_to_binary.py changed to remove compression. Total size of project on scratch ~2 TB
 
 October 20: 
 1. AOI scripts updated to use EPSG 3857, matching the Meta tiles.
