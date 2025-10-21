@@ -578,8 +578,10 @@ if __name__ == "__main__":
 
     # Choose which grids to process
     grid_paths = (
-        ["AOI/grid_100km.gpkg"] if USE_TEST_SETTINGS
-        else ["AOI/grid_3km.gpkg", "AOI/grid_20km.gpkg", "AOI/grid_40km.gpkg"]
+        ["/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_100km.gpkg"] if USE_TEST_SETTINGS
+        else ["/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_3km.gpkg",
+              "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_20km.gpkg",
+              "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_40km.gpkg"]
     )
 
     # Initialize spatial index once before processing any grids
