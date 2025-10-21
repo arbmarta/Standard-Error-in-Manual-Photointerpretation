@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING, # Changed from logging.INFO
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ def convert_to_binary(input_path, output_path):
         return False, f"✗ {filename}: {str(e)}"
 
 
-def convert_all_rasters(input_dir, output_dir, max_workers=64):
+def convert_all_rasters(input_dir, output_dir, max_workers=16):
     """
     Convert all .tif files in input_dir to binary format in output_dir
     """
@@ -154,4 +154,4 @@ if __name__ == "__main__":
     logger.info(f"Output directory: {output_dir}")
 
     # Run conversion
-    convert_all_rasters(input_dir, output_dir, max_workers=64)
+    convert_all_rasters(input_dir, output_dir, max_workers=16)
