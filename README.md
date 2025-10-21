@@ -3,6 +3,7 @@
 October 21:
 1. rasters_to_binary.py updated for use on Trillium HPC with reduced I/O demand. Decreased max_workers from 64 to 16.
 2. rasters_to_binary.py changed to remove compression. Total size of project on scratch ~2 TB
+3. canopy_metrics.py updated for use on Trillium HPC.
 
 October 20: 
 1. AOI scripts updated to use EPSG 3857, matching the Meta tiles.
@@ -34,9 +35,11 @@ This folder contains the scripts (.py and .sh) used for processing on SciNet's T
 1. **download Meta.py:** Automates the download and processing of the Meta CHM tiles from the S3 bucket, 
 first validating that each file exists in the cloud. If the tiles are not already locally stored, it downloads them in parallel.
 2. **rasters_to_binary.py:** Converts downloaded Meta tiles in Meta_CHM_Raw to binary 1-bit binary rasters (0/1) based on a height threshold - heights above 2 m take the value of 1, else 0.
+3. **canopy_metrics.py:** Calculates canopy extent, clustering, and fragmentation indices.
 
 **Other Files**
-1. **rasters_to_binary.sh:** The bash file associated with rasters_to_binary.py.
-2. **helpers:** Commands used on Trillium HPC.
+1. **rasters_to_binary.sh:** The shell file associated with rasters_to_binary.py.
+2. **canopy_metrics.sh:** The shell file associated with canopy_metrics.py.
+3. **helpers:** Commands used on Trillium HPC.
 
 ## Scripts

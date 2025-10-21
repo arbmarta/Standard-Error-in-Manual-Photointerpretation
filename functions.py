@@ -161,7 +161,7 @@ def main_download_workflow(quadkeys,
 
 #endregion
 
-# ------------------------------------------ Functions for canopy metrics.py -------------------------------------------
+# ------------------------------------------ Functions for canopy_metrics.py -------------------------------------------
 #region
 
 def process_grid_cells_with_raster_association(grid_gdf, raster_folder, aoi_size, output_dir='.',
