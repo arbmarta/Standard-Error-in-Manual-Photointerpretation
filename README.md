@@ -1,21 +1,13 @@
 # Change Log for master branch
 
+October 21:
+1. rasters_to_binary.py updated for use on Trillium HPC with reduced I/O demand. Decreased max_workers from 64 to 16.
+2. rasters_to_binary.py changed to remove compression. Total size of project on scratch ~2.2 TB
+
 October 20: 
 1. AOI scripts updated to use EPSG 3857, matching the Meta tiles.
 2. download_meta.py and rasters_to_binary.py optimized for running on Trillium HPC
 3. Meta CHMs successfully downloaded using 
-
-# Notes between Lukas and Alex
-The Meta dataset uses the CRS EPSG 3857.
-
-The AOI folder is done. Download and save to PyCharm project. Needs to run grid_generator.py to create the grid_3km.gpkg as it is 200 MB.
-
-Next steps:
-1. Download the Meta CHMs to Lukas' computer using the download Meta.py (already set up to run)
-2. Process the Meta CHMs using canopy metrics.py (already set up to run). Import CSVs to GitHub in a new directory folder titled Results
-3. Need to generate the random sample points as a sticker that can be applied across all grid cells. Need different generator for different AOI sizes. Should run 10,000 sample points at 3 km, 100,000 at 24 and 54 km. This should save as a csv with columns cell_id and point_id with each point having its own column (because they will have the same position x,y on each grid cell. Generate one csv for each AOI size.
-4. Statistical Analysis after all this is done.
-
 
 # Files
 ## Folders
@@ -35,5 +27,16 @@ This folder contains the scripts and datasets for generating grids over the cont
 6. **tiles_in_aoi.txt:** List of tile IDs contained within the AOI.
 7. **Tiles in AOI.pdf:** Map showing tiles and AOI boundaries.
 
+### Trillium
+This folder contains the scripts (.py and .sh) used for processing on SciNet's Trillium HPC (University of Toronto).
+
+**.py Files**
+1. **download Meta.py:** Automates the download and processing of the Meta CHM tiles from the S3 bucket, 
+first validating that each file exists in the cloud. If the tiles are not already locally stored, it downloads them in parallel.
+2. **rasters_to_binary.py:** Converts downloaded Meta tiles in Meta_CHM_Raw to binary 1-bit binary rasters (0/1) based on a height threshold - heights above 2 m take the value of 1, else 0.
+
+**Other Files**
+1. **rasters_to_binary.sh:** The bash file associated with rasters_to_binary.py.
+2. **helpers:** Commands used on Trillium HPC.
+
 ## Scripts
-1. **download Meta.py:** Automates the download and processing of the Meta CHM tiles from the S3 bucket, first validating that each file exists in the cloud. If the tiles are not already locally stored, it downloads them in parallel, then converts them into 1-bit binary rasters (0/1) based on a height threshold (heights above 2 m coded as 1, else 0) and deletes the raw files after successful conversion.
