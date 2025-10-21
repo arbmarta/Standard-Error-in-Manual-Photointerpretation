@@ -6,7 +6,7 @@ October 21:
 3. canopy_metrics.py updated for use on Trillium HPC.
 
 October 20: 
-1. AOI scripts updated to use EPSG 3857, matching the Meta tiles.
+1. AOI scripts updated to use EPSG 3857, matching the Meta tiles (https://doi.org/10.1016/j.rse.2023.113888).
 2. download_meta.py and rasters_to_binary.py optimized for running on Trillium HPC
 3. Meta CHMs successfully downloaded using 
 
@@ -16,8 +16,8 @@ October 20:
 This folder contains the scripts and datasets for generating grids over the contiguous United States (CONUS), which is our area of interest.
 
 **.py Files:**
-1. **CONUS.py:** Loads the US states shapefile from TIGER (US Census Bureau), removes states and territories outside the contiguous United States (AK, HI, PR, GU, VI, MP, AS), merges the remaining states, and exports conus.gpkg. This file provides the AOI polygon used for further processing.
-2. **grid_generator.py:** Uses conus.gpkg to generate square grid datasets across the contiguous United States with cell size lengths of 3, 24, and 54 km. Each grid includes a unique cell_id and centroid coordinates in both projected (EPSG:5070) and geographic (EPSG:4326) coordinates. Only cells fully contained within the AOI are retained.
+1. **conus.py:** Loads the US states shapefile from TIGER (US Census Bureau), removes states and territories outside the contiguous United States (AK, HI, PR, GU, VI, MP, AS), merges the remaining states, and exports conus.gpkg. This file provides the AOI polygon used for further processing.
+2. **grid_cells.py:** Uses conus.gpkg to generate square grid datasets across the contiguous United States with cell size lengths of 3, 24, and 54 km. Each grid includes a unique cell_id and centroid coordinates in both projected (EPSG:5070) and geographic (EPSG:4326) coordinates. Only cells fully contained within the AOI are retained.
 
 **Datasets:**
 1. **conus.gpkg:** Geopackage of the contiguous United States AOI.

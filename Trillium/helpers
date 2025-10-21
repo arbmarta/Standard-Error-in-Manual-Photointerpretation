@@ -5,7 +5,7 @@ Import
 scp -i ~/.ssh/id_ed /cygdrive/c/Users/alexj/Downloads/FILE USER@trillium.scinet.utoronto.ca:/scratch/arbmarta
 
 Get to python myenv
-source /home/USER/.virtualenvs/myenv/bin/activate
+source /home/arbmarta/.virtualenvs/myenv/bin/activate
 
 Pip install
 pip install PACKAGE
@@ -21,3 +21,13 @@ sbatch /scratch/USER/CODE.sh
 
 queue
 squeue -u USER
+
+run downloader on datamover node
+# Navigate to your directory
+cd /scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation
+
+# Activate your virtual environment
+source /home/arbmarta/.virtualenvs/myenv/bin/activate
+
+# Run the script
+python download_meta.py

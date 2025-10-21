@@ -8,6 +8,8 @@ import logging
 from pathlib import Path
 import time
 from tqdm import tqdm
+import rasterio
+from rasterio.crs import CRS
 
 # Configure logging
 logging.basicConfig(
@@ -169,6 +171,25 @@ def download_rasters(quadkeys, output_dir="Meta_CHM_Raw", max_workers=30):
         logger.warning(f"Failure details saved to {report_path}")
 
 
+def assign_crs_to_rasters(output_dir, crs='EPSG:3857'):
+    """Assign CRS to all rasters that are missing it."""
+    from pathlib import Path
+
+    logger.info(f"Assigning CRS to rasters in {output_dir}...")
+    raster_files = list(Path(output_dir).glob("*.tif"))
+
+    fixed = 0
+    for raster_path in tqdm(raster_files, desc="Assigning CRS"):
+        try:
+            with rasterio.open(raster_path, 'r+') as src:
+                if src.crs is None:
+                    src.crs = CRS.from_string(crs)
+                    fixed += 1
+        except Exception as e:
+            logger.warning(f"Could not assign CRS to {raster_path}: {e}")
+
+    logger.info(f"Assigned CRS to {fixed} rasters")
+
 if __name__ == "__main__":
     # Load quadkeys from AOI file
     if USE_TEST_SETTINGS:
@@ -185,3 +206,6 @@ if __name__ == "__main__":
 
     # Download rasters
     download_rasters(quadkeys, output_dir=output_dir, max_workers=30)
+
+    # Assign CRS to downloaded rasters
+    assign_crs_to_rasters(output_dir)

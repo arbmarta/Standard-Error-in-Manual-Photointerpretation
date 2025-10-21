@@ -13,18 +13,22 @@ from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import psutil
 from shapely import box
+from rasterio.crs import CRS
 
 USE_TEST_SETTINGS = True
 
 # HPC-optimized configuration
 CHUNK_SIZE = 50  # Larger batches for better throughput with many workers
 
+# BINARY THRESHOLD - adjust as needed for your data
+CANOPY_HEIGHT_THRESHOLD = 2.0  # meters - pixels >= this value are canopy (1), else non-canopy (0)
+
 # Configure paths based on test settings
 if USE_TEST_SETTINGS:
-    RASTER_FOLDER = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Binary_test"
+    RASTER_FOLDER = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Raw_test"
     OUTPUT_SUFFIX = "_test"
 else:
-    RASTER_FOLDER = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Binary"
+    RASTER_FOLDER = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Raw"
     OUTPUT_SUFFIX = ""
 
 logging.basicConfig(
@@ -73,7 +77,7 @@ def build_raster_spatial_index(raster_folder):
                 bounds = src.bounds
 
                 # Assign CRS if missing
-                crs = src.crs if src.crs is not None else rasterio.crs.CRS.from_epsg(3857)
+                crs = src.crs if src.crs is not None else CRS.from_epsg(3857)
 
                 idx.insert(i, (bounds.left, bounds.bottom, bounds.right, bounds.top))
 
@@ -109,7 +113,6 @@ def get_intersecting_rasters_indexed(grid_cell_geometry, spatial_index, raster_i
             raster_bounds = raster_info[raster_id]['bounds']
 
             # Create raster geometry from bounds
-            # Assume rasters are in same CRS as grid (EPSG:3857) since we verified this
             raster_geom = box(raster_bounds.left, raster_bounds.bottom,
                               raster_bounds.right, raster_bounds.top)
 
@@ -120,6 +123,18 @@ def get_intersecting_rasters_indexed(grid_cell_geometry, spatial_index, raster_i
             continue
 
     return intersecting_rasters
+
+
+def convert_to_binary(raster_data, threshold=CANOPY_HEIGHT_THRESHOLD):
+    """Convert continuous CHM values to binary canopy/non-canopy."""
+    # Handle nodata values (typically negative or very large values)
+    # Assume valid CHM values are between 0 and 100 meters
+    valid_mask = (raster_data >= 0) & (raster_data <= 100)
+
+    # Create binary raster: 1 where height >= threshold, 0 otherwise
+    binary_raster = np.where(valid_mask & (raster_data >= threshold), 1, 0).astype(np.int8)
+
+    return binary_raster
 
 
 def mosaic_rasters(raster_paths, target_geometry, target_resolution=None):
@@ -147,7 +162,7 @@ def mosaic_rasters(raster_paths, target_geometry, target_resolution=None):
             mosaic, out_trans = merge(
                 src_files,
                 res=target_resolution,
-                method='max'
+                method='max'  # Use max for CHM values
             )
 
             for src in src_files:
@@ -161,7 +176,7 @@ def mosaic_rasters(raster_paths, target_geometry, target_resolution=None):
                         width=mosaic.shape[2],
                         count=1,
                         dtype=mosaic.dtype,
-                        crs=src_files[0].crs,
+                        crs=src_files[0].crs if src_files[0].crs else CRS.from_epsg(3857),
                         transform=out_trans
                 ) as dataset:
                     dataset.write(mosaic[0], 1)
@@ -220,8 +235,18 @@ def process_single_cell(args):
         if raster_data is None or raster_data.size == 0:
             return None
 
+        # CONVERT TO BINARY HERE
+        binary_raster = convert_to_binary(raster_data, threshold=CANOPY_HEIGHT_THRESHOLD)
+
+        # Debug output for first few cells
+        if cell_id < 3:
+            print(f"\n=== DEBUG Cell {cell_id} ===")
+            print(f"Raw data range: {raster_data.min():.2f} to {raster_data.max():.2f}")
+            print(f"Binary pixels: {np.sum(binary_raster)} canopy, {np.sum(binary_raster == 0)} non-canopy")
+            print(f"Canopy percentage: {(np.sum(binary_raster) / binary_raster.size) * 100:.2f}%")
+
         cell_size = abs(transform.a)
-        metrics = calculate_landscape_metrics(raster_data, cell_size=cell_size)
+        metrics = calculate_landscape_metrics(binary_raster, cell_size=cell_size)
         metrics['cell_id'] = cell_id
         metrics['num_intersecting_rasters'] = len(intersecting_rasters)
 
@@ -243,6 +268,7 @@ def process_grid_cells_parallel(grid_gdf, aoi_size, output_dir='.'):
         return None
 
     print(f"Processing {len(grid_gdf)} grid cells for AOI size: {aoi_size}")
+    print(f"Using canopy height threshold: {CANOPY_HEIGHT_THRESHOLD} meters")
 
     # Prepare arguments for parallel processing
     args_list = [
@@ -586,6 +612,7 @@ if __name__ == "__main__":
     print(f"Memory available: {psutil.virtual_memory().available / (1024 ** 3):.1f} GB")
     print(f"Raster folder: {RASTER_FOLDER}")
     print(f"Output suffix: {OUTPUT_SUFFIX}")
+    print(f"Canopy height threshold: {CANOPY_HEIGHT_THRESHOLD} meters")
 
     output_directory = "output"
     os.makedirs(output_directory, exist_ok=True)
