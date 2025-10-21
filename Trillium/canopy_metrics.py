@@ -174,6 +174,9 @@ def process_single_cell(args):
         )
 
         if not intersecting_rasters:
+            if cell_id < 5:
+                logger.warning(f"Cell {cell_id} has no intersecting rasters. Cell bounds: {geometry.bounds}")
+
             return {
                 'canopy_extent': 0,
                 'morans_i': 0,
