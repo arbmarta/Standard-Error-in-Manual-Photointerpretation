@@ -1,4 +1,7 @@
 # Change Log for master branch
+October 23:
+1. Changed test area to midwest to ensure that area is fully covered by Meta CHM tiles.
+2. Addressed Issues 2 and 3 concerning spatial indexing failure.
 
 October 21:
 1. rasters_to_binary.py updated for use on Trillium HPC with reduced I/O demand. Decreased max_workers from 64 to 16.

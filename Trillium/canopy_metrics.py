@@ -2,26 +2,33 @@ import logging
 import numpy as np
 import pandas as pd
 import rasterio
-import rasterio.mask
+from rasterio.mask import mask
+from rasterio.merge import merge
 from scipy import ndimage
 from scipy.spatial.distance import pdist
 from skimage.measure import label, regionprops
 from tqdm import tqdm
 from multiprocessing import Pool
-from shapely import box
+from shapely.geometry import box
 
 USE_TEST_SETTINGS = True
 
 # HPC-optimized configuration
-CHUNK_SIZE = 50  # Larger batches for better throughput with many workers
+CHUNK_SIZE = 50
 
 # Configure paths based on test settings
 if USE_TEST_SETTINGS:
-    RASTER_FOLDER = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Binary_test"
+    RASTER_FOLDER = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Raw_test"
     OUTPUT_SUFFIX = "_test"
 else:
-    RASTER_FOLDER = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Binary"
+    RASTER_FOLDER = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Raw"
     OUTPUT_SUFFIX = ""
+
+# GPKG file path
+GRID_PATH = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_100km.gpkg"
+
+# Binary threshold: values < 2 → 0, values >= 2 → 1
+CANOPY_THRESHOLD = 2.0
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -29,7 +36,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Precompute and cache spatial index globally
 _SPATIAL_INDEX = None
 _RASTER_INFO = None
 
@@ -37,25 +43,19 @@ _RASTER_INFO = None
 def initialize_spatial_index():
     """Initialize spatial index once and cache it globally."""
     global _SPATIAL_INDEX, _RASTER_INFO
-
     if _SPATIAL_INDEX is not None:
         return _SPATIAL_INDEX, _RASTER_INFO
-
     print("Building spatial index (one-time initialization)...")
     _SPATIAL_INDEX, _RASTER_INFO = build_raster_spatial_index(RASTER_FOLDER)
     return _SPATIAL_INDEX, _RASTER_INFO
 
 
 def build_raster_spatial_index(raster_folder):
-    """Build a spatial index of all raster files for efficient intersection queries.
-
-    KEY FIX: Ensure all rasters are properly indexed with correct bounds and CRS handling.
-    """
+    """Build a spatial index of all raster files."""
     try:
         from rtree import index
     except ImportError:
         print("Warning: rtree not available. Install with: pip install rtree")
-        print("Falling back to brute force intersection checking...")
         return None, None
 
     idx = index.Index()
@@ -66,7 +66,7 @@ def build_raster_spatial_index(raster_folder):
     raster_pattern = os.path.join(raster_folder, "*.tif*")
     raster_files = glob.glob(raster_pattern)
 
-    print(f"Indexing {len(raster_files)} raster files...")
+    print(f"Indexing {len(raster_files)} raw CHM raster files...")
 
     indexed_count = 0
     for i, raster_path in enumerate(raster_files):
@@ -74,16 +74,11 @@ def build_raster_spatial_index(raster_folder):
             with rasterio.open(raster_path) as src:
                 bounds = src.bounds
 
-                # Check if bounds are valid
                 if bounds.left >= bounds.right or bounds.bottom >= bounds.top:
                     logger.warning(f"Invalid bounds for {raster_path}: {bounds}")
                     continue
 
-                # Assign CRS if missing
                 crs = src.crs if src.crs is not None else rasterio.crs.CRS.from_epsg(3857)
-
-                # FIX 1: Ensure bounds are in the correct format (minx, miny, maxx, maxy)
-                # The rtree index expects: (minx, miny, maxx, maxy)
                 idx.insert(i, (bounds.left, bounds.bottom, bounds.right, bounds.top))
 
                 raster_info[i] = {
@@ -99,7 +94,6 @@ def build_raster_spatial_index(raster_folder):
 
     print(f"Spatial index built with {indexed_count} rasters")
 
-    # FIX 2: Verify the index has items
     if indexed_count == 0:
         logger.error("No rasters were successfully indexed!")
         return None, None
@@ -107,53 +101,57 @@ def build_raster_spatial_index(raster_folder):
     return idx, raster_info
 
 
-def get_intersecting_rasters_indexed(grid_cell_geometry, spatial_index, raster_info):
-    """Find all raster files that intersect with a given grid cell geometry.
-
-    KEY FIXES:
-    1. Ensure query bounds are in correct format
-    2. Add validation and debugging
-    3. Handle edge cases properly
+def apply_binary_threshold(raster_array, threshold=CANOPY_THRESHOLD):
     """
-    from shapely.geometry import box
+    Apply binary threshold to raw CHM data.
 
+    Values < threshold → 0 (no canopy)
+    Values >= threshold → 1 (canopy present)
+
+    Args:
+        raster_array: numpy array with raw CHM values
+        threshold: height threshold (default: 2.0 meters)
+
+    Returns:
+        Binary numpy array (0s and 1s)
+    """
+    # Create binary: < 2 becomes 0, >= 2 becomes 1
+    binary_raster = np.where(raster_array >= threshold, 1, 0).astype(np.uint8)
+
+    # Handle NaN or nodata values - set them to 0
+    if np.isnan(raster_array).any():
+        binary_raster[np.isnan(raster_array)] = 0
+
+    return binary_raster
+
+
+def get_intersecting_rasters_indexed(grid_cell_geometry, spatial_index, raster_info):
+    """Find all raster files that intersect with a given grid cell geometry."""
     intersecting_rasters = []
-
-    # FIX 1: Get bounds in correct order (minx, miny, maxx, maxy)
     minx, miny, maxx, maxy = grid_cell_geometry.bounds
 
-    # FIX 2: Validate bounds before querying
     if minx >= maxx or miny >= maxy:
         logger.warning(f"Invalid geometry bounds: {grid_cell_geometry.bounds}")
         return []
 
     if spatial_index is not None:
-        # FIX 3: Query spatial index with bounds in correct format
-        # rtree.intersection expects: (minx, miny, maxx, maxy)
         try:
             candidate_ids = list(spatial_index.intersection((minx, miny, maxx, maxy)))
         except Exception as e:
             logger.error(f"Error querying spatial index: {e}")
-            # Fallback to all rasters
             candidate_ids = list(raster_info.keys())
     else:
-        # Fallback: check all rasters
         candidate_ids = list(raster_info.keys())
 
-    # FIX 4: Add debugging for first few cells
     if len(candidate_ids) == 0:
-        # This helps debug the issue
         logger.debug(f"No candidates from spatial index for bounds: {(minx, miny, maxx, maxy)}")
 
     for raster_id in candidate_ids:
         try:
             raster_bounds = raster_info[raster_id]['bounds']
-
-            # Create raster geometry from bounds
             raster_geom = box(raster_bounds.left, raster_bounds.bottom,
                               raster_bounds.right, raster_bounds.top)
 
-            # FIX 5: Use proper geometric intersection check
             if grid_cell_geometry.intersects(raster_geom):
                 intersecting_rasters.append(raster_info[raster_id]['path'])
 
@@ -164,29 +162,34 @@ def get_intersecting_rasters_indexed(grid_cell_geometry, spatial_index, raster_i
     return intersecting_rasters
 
 
-def mosaic_rasters(raster_paths, target_geometry, target_resolution=None):
-    """Mosaic multiple rasters that intersect a target geometry."""
+def mosaic_rasters(raster_paths, target_geometry, target_resolution=None, apply_threshold=True):
+    """
+    Mosaic multiple rasters that intersect a target geometry.
+
+    NEW: Applies binary threshold after mosaicking if apply_threshold=True.
+    """
     if not raster_paths:
         return None, None
 
     if len(raster_paths) == 1:
         with rasterio.open(raster_paths[0]) as src:
-            out_image, out_transform = rasterio.mask.mask(
+            out_image, out_transform = mask(
                 src, [target_geometry], crop=True, all_touched=False
             )
+            # Apply binary threshold to raw CHM data
+            if apply_threshold:
+                out_image[0] = apply_binary_threshold(out_image[0])
             return out_image[0], out_transform
 
     try:
-        from rasterio.merge import merge
-
         # Use context manager for all files
-        with rasterio.Env(GDAL_CACHEMAX=512):  # Optimize GDAL cache
+        with rasterio.Env(GDAL_CACHEMAX=512):
             src_files = [rasterio.open(path) for path in raster_paths]
 
             if target_resolution is None:
                 target_resolution = min([abs(src.transform.a) for src in src_files])
 
-            mosaic, out_trans = merge(
+            mosaic_array, out_trans = merge(
                 src_files,
                 res=target_resolution,
                 method='max'
@@ -199,17 +202,20 @@ def mosaic_rasters(raster_paths, target_geometry, target_resolution=None):
             with MemoryFile() as memfile:
                 with memfile.open(
                         driver='GTiff',
-                        height=mosaic.shape[1],
-                        width=mosaic.shape[2],
+                        height=mosaic_array.shape[1],
+                        width=mosaic_array.shape[2],
                         count=1,
-                        dtype=mosaic.dtype,
+                        dtype=mosaic_array.dtype,
                         crs=src_files[0].crs,
                         transform=out_trans
                 ) as dataset:
-                    dataset.write(mosaic[0], 1)
-                    out_image, out_transform = rasterio.mask.mask(
+                    dataset.write(mosaic_array[0], 1)
+                    out_image, out_transform = mask(
                         dataset, [target_geometry], crop=True, all_touched=False
                     )
+                    # Apply binary threshold to raw CHM data
+                    if apply_threshold:
+                        out_image[0] = apply_binary_threshold(out_image[0])
                     return out_image[0], out_transform
 
     except Exception as e:
@@ -227,257 +233,133 @@ def process_single_cell(args):
         )
 
         if not intersecting_rasters:
-            if cell_id < 5:
-                logger.warning(f"Cell {cell_id} has no intersecting rasters. Cell bounds: {geometry.bounds}")
-
             return {
-                'canopy_extent': 0,
-                'morans_i': 0,
-                'join_count_bb': 0,
-                'hansens_uniformity': 0.5,
-                'geary_c': 1.0,
-                'edge_density': 0,
-                'clumpy': 0,
-                'number_of_patches': 0,
-                'avg_patch_size': 0,
-                'patch_size_std': 0,
-                'patch_size_median': 0,
-                'patch_size_min': 0,
-                'patch_size_max': 0,
-                'normalized_lsi': 0,
-                'landscape_type': 'no_data',
                 'cell_id': cell_id,
-                'num_intersecting_rasters': 0
+                'canopy_cover': 0,
+                'total_pixels': 0,
+                'canopy_pixels': 0,
+                'error': 'no_rasters_found'
             }
 
-        if len(intersecting_rasters) > 1:
-            raster_data, transform = mosaic_rasters(intersecting_rasters, geometry)
-        else:
-            with rasterio.open(intersecting_rasters[0]) as src:
-                out_image, transform = rasterio.mask.mask(
-                    src, [geometry], crop=True, all_touched=False
-                )
-                raster_data = out_image[0]
+        # Mosaic raw rasters and apply binary threshold
+        binary_raster, transform = mosaic_rasters(
+            intersecting_rasters,
+            geometry,
+            apply_threshold=True  # Apply threshold: < 2 → 0, >= 2 → 1
+        )
 
-        if raster_data is None or raster_data.size == 0:
-            return None
+        if binary_raster is None:
+            return {
+                'cell_id': cell_id,
+                'canopy_cover': 0,
+                'total_pixels': 0,
+                'canopy_pixels': 0,
+                'error': 'mosaic_failed'
+            }
 
-        cell_size = abs(transform.a)
-        metrics = calculate_landscape_metrics(raster_data, cell_size=cell_size)
+        # Calculate metrics on binary raster
+        metrics = calculate_all_metrics(binary_raster, transform)
         metrics['cell_id'] = cell_id
-        metrics['num_intersecting_rasters'] = len(intersecting_rasters)
 
         return metrics
 
     except Exception as e:
-        logger.error(f"Error processing cell_id {cell_id}: {e}")
-        return None
-
-
-def process_grid_cells_parallel(grid_gdf, aoi_size, output_dir='.'):
-    """Process grid cells in parallel using multiprocessing."""
-
-    # Initialize spatial index once
-    spatial_index, raster_info = initialize_spatial_index()
-
-    if spatial_index is None:
-        print("ERROR: Could not build spatial index. Exiting.")
-        return None
-
-    print(f"Processing {len(grid_gdf)} grid cells for AOI size: {aoi_size}")
-
-    # Prepare arguments for parallel processing
-    args_list = [
-        (row['cell_id'], row.geometry, spatial_index, raster_info)
-        for _, row in grid_gdf.iterrows()
-    ]
-
-    # Process in parallel with progress bar
-    results_list = []
-    with Pool(processes=192) as pool:
-        for result in tqdm(
-                pool.imap_unordered(process_single_cell, args_list, chunksize=10),
-                total=len(args_list),
-                desc=f"Processing {aoi_size}"
-        ):
-            if result is not None:
-                results_list.append(result)
-
-    # Create DataFrame
-    results_df = pd.DataFrame(results_list)
-
-    # Save to CSV
-    output_filename = f"canopy_metrics_{aoi_size}{OUTPUT_SUFFIX}.csv"
-    output_path = os.path.join(output_dir, output_filename)
-    results_df.to_csv(output_path, index=False)
-
-    print(f"Results saved to: {output_path}")
-    print(f"Processed {len(results_df)} grid cells successfully")
-
-    return results_df
-
-
-# LANDSCAPE METRICS (optimized versions)
-def calculate_landscape_metrics(raster_data, cell_size=None):
-    """Calculate comprehensive landscape metrics for binary raster (optimized)."""
-
-    if raster_data is None or raster_data.size == 0:
+        logger.error(f"Error processing cell {cell_id}: {e}")
         return {
-            'canopy_extent': 0, 'morans_i': 0, 'join_count_bb': 0,
-            'hansens_uniformity': 0.5, 'geary_c': 1.0, 'edge_density': 0,
-            'clumpy': 0, 'number_of_patches': 0, 'avg_patch_size': 0,
-            'patch_size_std': 0, 'patch_size_median': 0, 'patch_size_min': 0,
-            'patch_size_max': 0, 'normalized_lsi': 0, 'landscape_type': 'no_data'
+            'cell_id': cell_id,
+            'canopy_cover': 0,
+            'total_pixels': 0,
+            'canopy_pixels': 0,
+            'error': str(e)
         }
 
-    binary_raster = raster_data.astype(np.int8)  # More memory efficient
 
-    if cell_size is None:
-        cell_size = 1.0
+def calculate_all_metrics(binary_raster, transform):
+    """Calculate all canopy metrics from binary raster."""
 
+    if binary_raster is None or binary_raster.size == 0:
+        return get_empty_metrics()
+
+    # Basic counts
+    total_pixels = binary_raster.size
+    canopy_pixels = np.sum(binary_raster == 1)
+
+    # Calculate cell size from transform
+    cell_size = abs(transform.a)
     area_multiplier = cell_size ** 2
-    results = {}
 
-    unique_values = np.unique(binary_raster)
-    total_cells = binary_raster.size
-    canopy_cells = np.sum(binary_raster)
+    # Basic canopy cover
+    canopy_cover = (canopy_pixels / total_pixels) * 100 if total_pixels > 0 else 0
 
-    results['canopy_extent'] = (canopy_cells / total_cells) * 100
+    metrics = {
+        'canopy_cover': canopy_cover,
+        'total_pixels': int(total_pixels),
+        'canopy_pixels': int(canopy_pixels),
+        'cell_size_m': cell_size,
+    }
 
-    # Handle uniform landscapes
-    if len(unique_values) == 1:
-        if unique_values[0] == 0:
-            results.update({
-                'morans_i': 0, 'join_count_bb': 0, 'hansens_uniformity': 1.0,
-                'geary_c': 1.0, 'edge_density': 0, 'clumpy': 0,
-                'number_of_patches': 0, 'avg_patch_size': 0, 'patch_size_std': 0,
-                'patch_size_median': 0, 'patch_size_min': 0, 'patch_size_max': 0,
-                'normalized_lsi': 0, 'landscape_type': 'all_non_canopy'
-            })
-        else:
-            total_area = total_cells * area_multiplier
-            results.update({
-                'morans_i': 1.0, 'join_count_bb': float('inf'),
-                'hansens_uniformity': 1.0, 'geary_c': 0.0, 'edge_density': 0,
-                'clumpy': 1.0, 'number_of_patches': 1, 'avg_patch_size': total_area,
-                'patch_size_std': 0, 'patch_size_median': total_area,
-                'patch_size_min': total_area, 'patch_size_max': total_area,
-                'normalized_lsi': 1.0, 'landscape_type': 'all_canopy'
-            })
-        return results
+    # Only calculate advanced metrics if there's canopy present
+    if canopy_pixels > 0:
+        try:
+            # Spatial autocorrelation metrics
+            metrics['morans_i'] = calculate_morans_i_fast(binary_raster)
+            metrics['gearys_c'] = calculate_geary_c_fast(binary_raster)
 
-    results['landscape_type'] = 'mixed'
+            # Patch-based metrics
+            patch_metrics = calculate_patch_metrics_raster(binary_raster, area_multiplier, cell_size)
+            metrics.update(patch_metrics)
 
-    # Calculate metrics (with vectorized operations where possible)
-    results['morans_i'] = calculate_morans_i_fast(binary_raster)
-    results['join_count_bb'] = calculate_join_count_bb_fast(binary_raster)
-    results['hansens_uniformity'] = calculate_hansens_uniformity(binary_raster)
-    results['geary_c'] = calculate_geary_c_fast(binary_raster)
-    results['edge_density'] = calculate_edge_density_fast(binary_raster, cell_size)
-    results['clumpy'] = calculate_clumpy_index_fast(binary_raster)
+            # Uniformity
+            metrics['hansens_uniformity'] = calculate_hansens_uniformity(binary_raster)
 
-    patch_metrics = calculate_patch_metrics_raster(binary_raster, area_multiplier, cell_size)
-    results.update(patch_metrics)
+        except Exception as e:
+            logger.warning(f"Error calculating advanced metrics: {e}")
+            metrics.update(get_empty_advanced_metrics())
+    else:
+        metrics.update(get_empty_advanced_metrics())
 
-    return results
+    return metrics
 
 
-def calculate_join_count_bb_fast(binary_raster):
-    """Optimized Join Count BB calculation using vectorized operations."""
+def get_empty_metrics():
+    """Return empty metrics dictionary."""
+    return {
+        'canopy_cover': 0,
+        'total_pixels': 0,
+        'canopy_pixels': 0,
+        'cell_size_m': 0,
+        **get_empty_advanced_metrics()
+    }
+
+
+def get_empty_advanced_metrics():
+    """Return empty advanced metrics."""
+    return {
+        'morans_i': 0,
+        'gearys_c': 1.0,
+        'number_of_patches': 0,
+        'avg_patch_size': 0,
+        'patch_size_std': 0,
+        'patch_size_median': 0,
+        'patch_size_min': 0,
+        'patch_size_max': 0,
+        'normalized_lsi': 0,
+        'hansens_uniformity': 0.5
+    }
+
+
+def calculate_morans_i_fast(binary_raster):
+    """Calculate Moran's I for spatial autocorrelation."""
     try:
-        # Vectorized horizontal joins
-        horizontal_joins = np.sum(binary_raster[:, :-1] & binary_raster[:, 1:])
-
-        # Vectorized vertical joins
-        vertical_joins = np.sum(binary_raster[:-1, :] & binary_raster[1:, :])
-
-        bb_joins = horizontal_joins + vertical_joins
-        total_joins = binary_raster.shape[0] * (binary_raster.shape[1] - 1) + \
-                      binary_raster.shape[1] * (binary_raster.shape[0] - 1)
-
-        if total_joins == 0:
+        coords_y, coords_x = np.where(binary_raster >= 0)
+        if len(coords_y) < 2:
             return 0
 
-        p = np.mean(binary_raster)
-        expected_bb = total_joins * p * p
-        variance_bb = total_joins * p * p * (1 - p * p)
+        sample_size = min(1000, len(coords_y))
+        indices = np.random.choice(len(coords_y), sample_size, replace=False)
 
-        if variance_bb <= 0:
-            return 0
-
-        return (bb_joins - expected_bb) / np.sqrt(variance_bb)
-
-    except Exception as e:
-        logger.warning(f"Could not calculate Join Count BB: {e}")
-        return 0
-
-
-def calculate_edge_density_fast(binary_raster, cell_size):
-    """Optimized edge density calculation."""
-    try:
-        # Use fast convolution for edge detection
-        kernel = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]], dtype=np.int8)
-        neighbors = ndimage.convolve(binary_raster, kernel, mode='constant', cval=0)
-        edges = (binary_raster == 1) & (neighbors < 4)
-
-        edge_length = np.sum(edges) * cell_size
-        total_area = binary_raster.size * (cell_size ** 2)
-
-        return edge_length / total_area if total_area > 0 else 0
-
-    except Exception as e:
-        logger.warning(f"Could not calculate edge density: {e}")
-        return 0
-
-
-def calculate_clumpy_index_fast(binary_raster):
-    """Optimized CLUMPY index calculation."""
-    try:
-        P = np.mean(binary_raster)
-
-        if P == 0 or P == 1:
-            return 0
-
-        # Vectorized adjacency calculation
-        h_likes = np.sum(binary_raster[:, :-1] == binary_raster[:, 1:])
-        v_likes = np.sum(binary_raster[:-1, :] == binary_raster[1:, :])
-
-        total_adjacencies = binary_raster.shape[0] * (binary_raster.shape[1] - 1) + \
-                            binary_raster.shape[1] * (binary_raster.shape[0] - 1)
-
-        if total_adjacencies == 0:
-            return 0
-
-        G_observed = (h_likes + v_likes) / total_adjacencies
-        G_expected = P * P + (1 - P) * (1 - P)
-
-        if P < 0.5:
-            clumpy = (G_observed - G_expected) / (1 - G_expected)
-        else:
-            clumpy = (G_observed - G_expected) / G_expected
-
-        return clumpy
-
-    except Exception as e:
-        logger.warning(f"Could not calculate CLUMPY index: {e}")
-        return 0
-
-
-def calculate_morans_i_fast(raster_data):
-    """Faster Moran's I using sampling for large rasters."""
-    try:
-        # Sample for very large rasters
-        if raster_data.size > 5000:
-            sample_size = 2500
-            rows, cols = raster_data.shape
-            sample_indices = np.random.choice(raster_data.size, sample_size, replace=False)
-            sample_coords = np.unravel_index(sample_indices, (rows, cols))
-            values = raster_data[sample_coords]
-            coordinates = np.column_stack(sample_coords)
-        else:
-            rows, cols = raster_data.shape
-            coordinates = np.array([[i, j] for i in range(rows) for j in range(cols)])
-            values = raster_data.flatten()
+        coordinates = np.column_stack([coords_x[indices], coords_y[indices]])
+        values = binary_raster[coords_y[indices], coords_x[indices]].astype(np.float32)
 
         n = len(values)
         distances = pdist(coordinates, metric='chebyshev')
@@ -508,11 +390,10 @@ def calculate_morans_i_fast(raster_data):
 
 
 def calculate_geary_c_fast(binary_raster):
-    """Optimized Geary's C calculation."""
+    """Calculate Geary's C for spatial autocorrelation."""
     try:
         mean_val = np.mean(binary_raster)
 
-        # Vectorized difference calculations
         h_diffs = np.sum((binary_raster[:, :-1] - binary_raster[:, 1:]) ** 2)
         v_diffs = np.sum((binary_raster[:-1, :] - binary_raster[1:, :]) ** 2)
 
@@ -600,7 +481,6 @@ def calculate_hansens_uniformity(binary_raster):
         if window_size < 3:
             window_size = 3
 
-        # Vectorized window calculation using stride tricks
         from numpy.lib.stride_tricks import sliding_window_view
 
         windows = sliding_window_view(binary_raster, (window_size, window_size))
@@ -621,12 +501,29 @@ def calculate_hansens_uniformity(binary_raster):
         return 0.5
 
 
-# ADDITIONAL DEBUGGING FUNCTION - Add this to help diagnose issues
-def validate_spatial_index(spatial_index, raster_info, grid_sample):
-    """Validate that the spatial index is working correctly.
+def process_grid_cells_parallel(grid, spatial_index, raster_info, n_workers=4):
+    """Process all grid cells in parallel."""
+    print(f"\nProcessing {len(grid)} grid cells with {n_workers} workers...")
 
-    Call this function after building the index to verify it works.
-    """
+    # Prepare arguments for parallel processing
+    args_list = [
+        (row['cell_id'] if 'cell_id' in row else idx, row.geometry, spatial_index, raster_info)
+        for idx, row in grid.iterrows()
+    ]
+
+    # Process in parallel with progress bar
+    with Pool(n_workers) as pool:
+        results = list(tqdm(
+            pool.imap(process_single_cell, args_list, chunksize=CHUNK_SIZE),
+            total=len(args_list),
+            desc="Processing cells"
+        ))
+
+    return pd.DataFrame(results)
+
+
+def validate_spatial_index(spatial_index, raster_info, grid_sample):
+    """Validate that the spatial index is working correctly."""
     if spatial_index is None or raster_info is None:
         print("❌ Spatial index not initialized")
         return False
@@ -635,18 +532,15 @@ def validate_spatial_index(spatial_index, raster_info, grid_sample):
     print("VALIDATING SPATIAL INDEX")
     print("=" * 60)
 
-    # Test with first grid cell
     test_cell = grid_sample.iloc[0]
     test_geom = test_cell.geometry
     minx, miny, maxx, maxy = test_geom.bounds
 
     print(f"Test cell bounds: ({minx:.2f}, {miny:.2f}, {maxx:.2f}, {maxy:.2f})")
 
-    # Query spatial index
     candidates = list(spatial_index.intersection((minx, miny, maxx, maxy)))
     print(f"Spatial index returned: {len(candidates)} candidates")
 
-    # Manual check
     manual_count = 0
     for raster_id, info in raster_info.items():
         bounds = info['bounds']
@@ -658,13 +552,6 @@ def validate_spatial_index(spatial_index, raster_info, grid_sample):
 
     if len(candidates) != manual_count:
         print(f"❌ MISMATCH: Index returned {len(candidates)} but manual check found {manual_count}")
-        print("\nDEBUG INFO:")
-        print(f"Total rasters in index: {len(raster_info)}")
-        print(f"Raster bounds samples:")
-        for i, (rid, info) in enumerate(list(raster_info.items())[:3]):
-            b = info['bounds']
-            print(f"  Raster {rid}: ({b.left:.2f}, {b.bottom:.2f}, {b.right:.2f}, {b.top:.2f})")
-            print(f"  CRS: {info['crs']}")
         return False
     else:
         print(f"✓ Spatial index validation PASSED")
@@ -676,23 +563,26 @@ if __name__ == "__main__":
     import geopandas as gpd
     import os
 
-    # Your existing configuration
-    RASTER_FOLDER = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Binary_test"
-    GRID_PATH = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_100km.gpkg"
+    print("=" * 70)
+    print("CANOPY ANALYSIS WITH BINARY THRESHOLDING")
+    print(f"Threshold: Values < {CANOPY_THRESHOLD}m → 0, Values >= {CANOPY_THRESHOLD}m → 1")
+    print("=" * 70)
 
-    print("Building spatial index...")
+    # Build spatial index for raw CHM rasters
+    print("\nBuilding spatial index...")
     spatial_index, raster_info = build_raster_spatial_index(RASTER_FOLDER)
 
     if spatial_index is None:
         print("Failed to build spatial index!")
         exit(1)
 
-    print("\nLoading grid...")
+    # Load grid
+    print(f"\nLoading grid from: {GRID_PATH}")
     grid = gpd.read_file(GRID_PATH).to_crs(epsg=3857)
     print(f"Grid CRS: {grid.crs}")
     print(f"Grid cells: {len(grid)}")
 
-    # IMPORTANT: Validate the spatial index
+    # Validate spatial index
     print("\nValidating spatial index...")
     if not validate_spatial_index(spatial_index, raster_info, grid):
         print("\n⚠️  SPATIAL INDEX VALIDATION FAILED!")
@@ -700,7 +590,30 @@ if __name__ == "__main__":
         print("1. CRS mismatch between rasters and grid")
         print("2. Incorrect bounds format in index")
         print("3. Rasters don't actually overlap with grid cells")
-        print("\nRun the diagnostic script to investigate further.")
+        exit(1)
     else:
         print("\n✓ Spatial index is working correctly!")
-        print("You can proceed with processing.")
+
+    # Process grid cells
+    n_workers = min(os.cpu_count(), 16)  # Limit to 16 workers max
+    results_df = process_grid_cells_parallel(grid, spatial_index, raster_info, n_workers)
+
+    # Save results
+    output_path = f"/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/canopy_metrics{OUTPUT_SUFFIX}.csv"
+    results_df.to_csv(output_path, index=False)
+    print(f"\n✓ Results saved to: {output_path}")
+
+    # Summary statistics
+    print("\n" + "=" * 70)
+    print("SUMMARY STATISTICS")
+    print("=" * 70)
+    print(f"Total cells processed: {len(results_df)}")
+    print(f"Cells with canopy: {(results_df['canopy_cover'] > 0).sum()}")
+    print(f"Mean canopy cover: {results_df['canopy_cover'].mean():.2f}%")
+    print(f"Median canopy cover: {results_df['canopy_cover'].median():.2f}%")
+
+    if 'error' in results_df.columns:
+        errors = results_df['error'].notna().sum()
+        if errors > 0:
+            print(f"\n⚠️  Cells with errors: {errors}")
+            print(results_df['error'].value_counts())
