@@ -30,15 +30,6 @@ else:
 aoi_gdf = gpd.read_file("conus.gpkg", layer="conus").to_crs(epsg=3857)
 aoi_geom = aoi_gdf.union_all()
 
-# Load and filter tiles
-tiles = gpd.read_file(local_file).to_crs(epsg=3857)
-tiles_in_aoi = tiles[tiles.within(aoi_geom)]
-
-# Save filtered tiles
-tiles_in_aoi.to_file("tiles_in_aoi_test.geojson", driver="GeoJSON")
-tiles_in_aoi["tile"].to_csv("tiles_in_aoi_test.txt", index=False, header=False)
-print(f"Saved {len(tiles_in_aoi)} tiles in AOI")
-
 ## ------------------------------------------------ GENERATE MIDWEST GRID ------------------------------------------------
 
 # Define Midwest bounding box
@@ -63,7 +54,7 @@ y_range = range(int(miny), int(maxy), cell_size_m)
 for x in tqdm(x_range, desc=f"Generating {cell_size_km}km grid"):
     for y in y_range:
         cell = box(x, y, x + cell_size_m, y + cell_size_m)
-        # Only keep cells that are within CONUS
+        # Only keep cells that intersect the test area
         if aoi_geom.contains(cell):
             cells.append(cell)
 
@@ -79,6 +70,20 @@ filename = f"grid_{cell_size_km}km.gpkg"
 grid_gdf.to_file(filename, driver="GPKG")
 print(f"✅ Saved {len(grid_gdf)} cells to {filename}")
 
+# Create union of all grid cells
+grid_union = grid_gdf.union_all()
+
+## ------------------------------------------------ FILTER TILES BY GRID ------------------------------------------------
+
+# Load and filter tiles - only keep tiles intersecting the 100km grid
+tiles = gpd.read_file(local_file).to_crs(epsg=3857)
+tiles_in_grid = tiles[tiles.intersects(grid_union)]
+
+# Save filtered tiles
+tiles_in_grid.to_file("tiles_in_aoi_test.geojson", driver="GeoJSON")
+tiles_in_grid["tile"].to_csv("tiles_in_aoi_test.txt", index=False, header=False)
+print(f"Saved {len(tiles_in_grid)} tiles within 100km grid")
+
 ## ------------------------------------------------ VISUALIZE ------------------------------------------------
 
 fig, ax = plt.subplots(figsize=(12, 8))
@@ -87,13 +92,22 @@ fig, ax = plt.subplots(figsize=(12, 8))
 aoi_plot_gdf = gpd.GeoDataFrame([1], geometry=[aoi_geom], crs="EPSG:3857")
 aoi_plot_gdf.boundary.plot(ax=ax, color='black', linewidth=2, label='CONUS')
 
+# Plot tiles
+tiles_in_grid.boundary.plot(ax=ax, color='blue', linewidth=0.3, alpha=0.5, label='Tiles')
+
 # Plot grid
-grid_gdf.boundary.plot(ax=ax, color='red', linewidth=0.5, alpha=0.7, label=f'{cell_size_km}km Grid')
+grid_gdf.boundary.plot(ax=ax, color='red', linewidth=0.8, alpha=0.7, label=f'{cell_size_km}km Grid')
+
+# Zoom into the grid extent with some padding
+bounds = grid_gdf.total_bounds  # minx, miny, maxx, maxy
+padding = 50000  # 50km padding in meters
+ax.set_xlim(bounds[0] - padding, bounds[2] + padding)
+ax.set_ylim(bounds[1] - padding, bounds[3] + padding)
 
 # Styling
 ax.set_xticks([])
 ax.set_yticks([])
-ax.set_title(f"{cell_size_km}km Midwest Grid\n({len(grid_gdf):,} cells)",
+ax.set_title(f"{cell_size_km}km Midwest Grid\n({len(grid_gdf):,} cells, {len(tiles_in_grid):,} tiles)",
              fontsize=14, fontweight='bold')
 ax.legend(loc='lower left', frameon=False, fontsize=10)
 ax.grid(False)
@@ -108,3 +122,4 @@ print("=" * 60)
 print(f"  • Number of cells: {len(grid_gdf):,}")
 print(f"  • Cell area: {cell_size_km}×{cell_size_km} = {cell_size_km**2} km²")
 print(f"  • Total coverage: ~{len(grid_gdf) * cell_size_km**2:,} km²")
+print(f"  • Number of tiles: {len(tiles_in_grid):,}")
