@@ -1,9 +1,11 @@
+import logging
+import numpy as np
 import rasterio
+from rasterio.mask import mask
 import geopandas as gpd
 import glob
 import os
 from shapely.geometry import box
-from rasterio.mask import mask
 
 # Configuration
 USE_TEST_SETTINGS = True
@@ -14,6 +16,7 @@ else:
     RASTER_FOLDER = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Raw"
 
 GRID_PATH = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_100km.gpkg"
+CANOPY_THRESHOLD = 2.0
 
 print("=" * 70)
 print("DIAGNOSTIC SCRIPT - Finding the Issue")
@@ -109,44 +112,64 @@ print(f"\n   Cells with 0 intersections: {cell_intersection_counts.count(0)}")
 print(f"   Cells with >0 intersections: {sum(1 for c in cell_intersection_counts if c > 0)}")
 print(f"   Max intersections per cell: {max(cell_intersection_counts)}")
 
-# Step 6: Test actual data extraction
-print("\n6. Testing data extraction from first intersecting cell")
-for idx, cell_row in grid_transformed.iterrows():
-    cell_geom = cell_row.geometry
-    found_data = False
+# Step 6: Test actual data extraction and thresholding
+print("\n6. Testing data extraction and threshold application")
 
-    for raster_file in raster_files[:5]:  # Test first 5 rasters
-        with rasterio.open(raster_file) as rsrc:
-            raster_bounds = rsrc.bounds
-            raster_geom = box(raster_bounds.left, raster_bounds.bottom,
-                              raster_bounds.right, raster_bounds.top)
+# Use grid that's already in EPSG:3857 (same as rasters)
+grid_3857 = gpd.read_file(GRID_PATH).to_crs(epsg=3857)
+test_cell = grid_3857.iloc[0]
+test_geom = test_cell.geometry
 
-            if cell_geom.intersects(raster_geom):
-                try:
-                    out_image, out_transform = mask(
-                        rsrc, [cell_geom], crop=True, all_touched=False
-                    )
+print(f"   Testing cell 0 bounds: {test_geom.bounds}")
 
-                    if out_image[0].size > 0:
-                        print(f"   ✓ Successfully extracted data from cell {idx}")
-                        print(f"     Raster: {os.path.basename(raster_file)}")
-                        print(f"     Extracted shape: {out_image[0].shape}")
-                        print(f"     Min value: {out_image[0].min()}")
-                        print(f"     Max value: {out_image[0].max()}")
-                        print(f"     Mean value: {out_image[0].mean():.2f}")
-                        print(f"     Non-zero pixels: {(out_image[0] > 0).sum()}")
-                        print(f"     Values >= 2: {(out_image[0] >= 2).sum()}")
-                        found_data = True
-                        break
-                except Exception as e:
-                    print(f"     ❌ Error extracting data: {e}")
+# Find intersecting rasters
+intersecting_rasters = []
+for raster_file in raster_files:
+    with rasterio.open(raster_file) as src:
+        raster_bounds = src.bounds
+        raster_geom = box(raster_bounds.left, raster_bounds.bottom,
+                         raster_bounds.right, raster_bounds.top)
+        if test_geom.intersects(raster_geom):
+            intersecting_rasters.append(raster_file)
 
-    if found_data:
-        break
+print(f"   Found {len(intersecting_rasters)} intersecting rasters")
 
-    if idx >= 10:  # Only check first 10 cells
-        print("   ❌ No data found in first 10 cells")
-        break
+if len(intersecting_rasters) == 0:
+    print("   ❌ No intersecting rasters - this is the problem!")
+else:
+    # Test extraction from first intersecting raster
+    print(f"   Testing extraction from: {os.path.basename(intersecting_rasters[0])}")
+
+    with rasterio.open(intersecting_rasters[0]) as src:
+        try:
+            out_image, out_transform = mask(src, [test_geom], crop=True, all_touched=False)
+
+            print(f"   ✓ Extraction successful")
+            print(f"     Raw data shape: {out_image[0].shape}")
+            print(f"     Raw min: {out_image[0].min()}, max: {out_image[0].max()}, mean: {out_image[0].mean():.2f}")
+            print(f"     Raw pixels >= 2: {(out_image[0] >= 2).sum()}")
+
+            # Apply threshold
+            binary_raster = np.where(out_image[0] >= CANOPY_THRESHOLD, 1, 0).astype(np.uint8)
+            total_pixels = binary_raster.size
+            canopy_pixels = np.sum(binary_raster == 1)
+            canopy_cover = (canopy_pixels / total_pixels) * 100
+
+            print(f"     After threshold: {canopy_pixels} canopy pixels ({canopy_cover:.2f}%)")
+
+            if canopy_cover == 0:
+                print("\n   ❌ PROBLEM: Canopy cover is 0%")
+                unique_vals, counts = np.unique(out_image[0], return_counts=True)
+                print(f"   Unique values in raw data: {len(unique_vals)}")
+                for val, count in zip(unique_vals[:10], counts[:10]):
+                    print(f"     Value {val}: {count} pixels ({count/total_pixels*100:.2f}%)")
+            else:
+                print("   ✓ SUCCESS: Canopy detected!")
+
+        except Exception as e:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
 
 print("\n" + "=" * 70)
 print("DIAGNOSTIC COMPLETE")
