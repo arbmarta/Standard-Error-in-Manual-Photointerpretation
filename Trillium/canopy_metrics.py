@@ -1,8 +1,5 @@
-import geopandas as gpd
-import glob
 import logging
 import numpy as np
-import os
 import pandas as pd
 import rasterio
 import rasterio.mask
@@ -10,8 +7,7 @@ from scipy import ndimage
 from scipy.spatial.distance import pdist
 from skimage.measure import label, regionprops
 from tqdm import tqdm
-from multiprocessing import Pool, cpu_count
-import psutil
+from multiprocessing import Pool
 from shapely import box
 
 USE_TEST_SETTINGS = True
@@ -51,7 +47,10 @@ def initialize_spatial_index():
 
 
 def build_raster_spatial_index(raster_folder):
-    """Build a spatial index of all raster files for efficient intersection queries."""
+    """Build a spatial index of all raster files for efficient intersection queries.
+
+    KEY FIX: Ensure all rasters are properly indexed with correct bounds and CRS handling.
+    """
     try:
         from rtree import index
     except ImportError:
@@ -62,19 +61,29 @@ def build_raster_spatial_index(raster_folder):
     idx = index.Index()
     raster_info = {}
 
+    import glob
+    import os
     raster_pattern = os.path.join(raster_folder, "*.tif*")
     raster_files = glob.glob(raster_pattern)
 
     print(f"Indexing {len(raster_files)} raster files...")
 
-    for i, raster_path in enumerate(tqdm(raster_files, desc="Indexing rasters")):
+    indexed_count = 0
+    for i, raster_path in enumerate(raster_files):
         try:
             with rasterio.open(raster_path) as src:
                 bounds = src.bounds
 
+                # Check if bounds are valid
+                if bounds.left >= bounds.right or bounds.bottom >= bounds.top:
+                    logger.warning(f"Invalid bounds for {raster_path}: {bounds}")
+                    continue
+
                 # Assign CRS if missing
                 crs = src.crs if src.crs is not None else rasterio.crs.CRS.from_epsg(3857)
 
+                # FIX 1: Ensure bounds are in the correct format (minx, miny, maxx, maxy)
+                # The rtree index expects: (minx, miny, maxx, maxy)
                 idx.insert(i, (bounds.left, bounds.bottom, bounds.right, bounds.top))
 
                 raster_info[i] = {
@@ -82,39 +91,72 @@ def build_raster_spatial_index(raster_folder):
                     'bounds': bounds,
                     'crs': crs,
                 }
+                indexed_count += 1
+
         except Exception as e:
             logger.warning(f"Could not index {raster_path}: {e}")
             continue
 
-    print(f"Spatial index built with {len(raster_info)} rasters")
+    print(f"Spatial index built with {indexed_count} rasters")
+
+    # FIX 2: Verify the index has items
+    if indexed_count == 0:
+        logger.error("No rasters were successfully indexed!")
+        return None, None
+
     return idx, raster_info
 
 
 def get_intersecting_rasters_indexed(grid_cell_geometry, spatial_index, raster_info):
-    """Find all raster files that intersect with a given grid cell geometry."""
+    """Find all raster files that intersect with a given grid cell geometry.
+
+    KEY FIXES:
+    1. Ensure query bounds are in correct format
+    2. Add validation and debugging
+    3. Handle edge cases properly
+    """
     from shapely.geometry import box
 
     intersecting_rasters = []
+
+    # FIX 1: Get bounds in correct order (minx, miny, maxx, maxy)
     minx, miny, maxx, maxy = grid_cell_geometry.bounds
 
+    # FIX 2: Validate bounds before querying
+    if minx >= maxx or miny >= maxy:
+        logger.warning(f"Invalid geometry bounds: {grid_cell_geometry.bounds}")
+        return []
+
     if spatial_index is not None:
-        # Use R-tree spatial index
-        candidate_ids = list(spatial_index.intersection((minx, miny, maxx, maxy)))
+        # FIX 3: Query spatial index with bounds in correct format
+        # rtree.intersection expects: (minx, miny, maxx, maxy)
+        try:
+            candidate_ids = list(spatial_index.intersection((minx, miny, maxx, maxy)))
+        except Exception as e:
+            logger.error(f"Error querying spatial index: {e}")
+            # Fallback to all rasters
+            candidate_ids = list(raster_info.keys())
     else:
         # Fallback: check all rasters
         candidate_ids = list(raster_info.keys())
+
+    # FIX 4: Add debugging for first few cells
+    if len(candidate_ids) == 0:
+        # This helps debug the issue
+        logger.debug(f"No candidates from spatial index for bounds: {(minx, miny, maxx, maxy)}")
 
     for raster_id in candidate_ids:
         try:
             raster_bounds = raster_info[raster_id]['bounds']
 
             # Create raster geometry from bounds
-            # Assume rasters are in same CRS as grid (EPSG:3857) since we verified this
             raster_geom = box(raster_bounds.left, raster_bounds.bottom,
                               raster_bounds.right, raster_bounds.top)
 
+            # FIX 5: Use proper geometric intersection check
             if grid_cell_geometry.intersects(raster_geom):
                 intersecting_rasters.append(raster_info[raster_id]['path'])
+
         except Exception as e:
             logger.warning(f"Error checking intersection for raster {raster_id}: {e}")
             continue
@@ -579,66 +621,86 @@ def calculate_hansens_uniformity(binary_raster):
         return 0.5
 
 
+# ADDITIONAL DEBUGGING FUNCTION - Add this to help diagnose issues
+def validate_spatial_index(spatial_index, raster_info, grid_sample):
+    """Validate that the spatial index is working correctly.
+
+    Call this function after building the index to verify it works.
+    """
+    if spatial_index is None or raster_info is None:
+        print("❌ Spatial index not initialized")
+        return False
+
+    print("\n" + "=" * 60)
+    print("VALIDATING SPATIAL INDEX")
+    print("=" * 60)
+
+    # Test with first grid cell
+    test_cell = grid_sample.iloc[0]
+    test_geom = test_cell.geometry
+    minx, miny, maxx, maxy = test_geom.bounds
+
+    print(f"Test cell bounds: ({minx:.2f}, {miny:.2f}, {maxx:.2f}, {maxy:.2f})")
+
+    # Query spatial index
+    candidates = list(spatial_index.intersection((minx, miny, maxx, maxy)))
+    print(f"Spatial index returned: {len(candidates)} candidates")
+
+    # Manual check
+    manual_count = 0
+    for raster_id, info in raster_info.items():
+        bounds = info['bounds']
+        raster_box = box(bounds.left, bounds.bottom, bounds.right, bounds.top)
+        if test_geom.intersects(raster_box):
+            manual_count += 1
+
+    print(f"Manual intersection check: {manual_count} rasters")
+
+    if len(candidates) != manual_count:
+        print(f"❌ MISMATCH: Index returned {len(candidates)} but manual check found {manual_count}")
+        print("\nDEBUG INFO:")
+        print(f"Total rasters in index: {len(raster_info)}")
+        print(f"Raster bounds samples:")
+        for i, (rid, info) in enumerate(list(raster_info.items())[:3]):
+            b = info['bounds']
+            print(f"  Raster {rid}: ({b.left:.2f}, {b.bottom:.2f}, {b.right:.2f}, {b.top:.2f})")
+            print(f"  CRS: {info['crs']}")
+        return False
+    else:
+        print(f"✓ Spatial index validation PASSED")
+        return True
+
+
 # Main execution
 if __name__ == "__main__":
-    # Print system info
-    print(f"CPU cores available: {cpu_count()}")
-    print(f"Memory available: {psutil.virtual_memory().available / (1024 ** 3):.1f} GB")
-    print(f"Raster folder: {RASTER_FOLDER}")
-    print(f"Output suffix: {OUTPUT_SUFFIX}")
+    import geopandas as gpd
+    import os
 
-    output_directory = "output"
-    os.makedirs(output_directory, exist_ok=True)
+    # Your existing configuration
+    RASTER_FOLDER = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/Meta_CHM_Binary_test"
+    GRID_PATH = "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_100km.gpkg"
 
-    # Choose which grids to process
-    grid_paths = (
-        ["/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_100km.gpkg"] if USE_TEST_SETTINGS
-        else ["/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_3km.gpkg",
-              "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_20km.gpkg",
-              "/scratch/arbmarta/Standard-Error-in-Manual-Photointerpretation/AOI/grid_40km.gpkg"]
-    )
+    print("Building spatial index...")
+    spatial_index, raster_info = build_raster_spatial_index(RASTER_FOLDER)
 
-    # Initialize spatial index once before processing any grids
-    initialize_spatial_index()
+    if spatial_index is None:
+        print("Failed to build spatial index!")
+        exit(1)
 
-    # Process each grid size
-    for grid_path in grid_paths:
-        print(f"\n{'=' * 60}")
-        print(f"Loading grid: {grid_path}")
+    print("\nLoading grid...")
+    grid = gpd.read_file(GRID_PATH).to_crs(epsg=3857)
+    print(f"Grid CRS: {grid.crs}")
+    print(f"Grid cells: {len(grid)}")
 
-        grid = gpd.read_file(grid_path).to_crs(epsg=3857)
-
-        if grid.empty:
-            print(f"⚠️ Skipping {grid_path}: no cells found.")
-            continue
-
-        if "cell_id" not in grid.columns:
-            grid = grid.reset_index(drop=True)
-            grid["cell_id"] = grid.index
-
-        # Determine AOI size
-        if "3km" in grid_path:
-            aoi_size = "3km"
-        elif "20km" in grid_path:
-            aoi_size = "20km"
-        elif "40km" in grid_path:
-            aoi_size = "40km"
-        elif "100km" in grid_path:
-            aoi_size = "100km"
-        else:
-            aoi_size = "unknown"
-
-        print(f"Processing {aoi_size} grid with {len(grid)} cells")
-
-        # Process grid cells in parallel
-        results_df = process_grid_cells_parallel(grid, aoi_size, output_directory)
-
-        if results_df is not None:
-            print(f"\nSummary for {aoi_size}:")
-            print(f"Total cells processed: {len(results_df)}")
-            print(f"Average canopy extent: {results_df['canopy_extent'].mean():.2f}%")
-            print(f"Cells with no data: {sum(results_df['num_intersecting_rasters'] == 0)}")
-            print(f"Cells with multiple rasters: {sum(results_df['num_intersecting_rasters'] > 1)}")
-
-    print(f"\n{'=' * 60}")
-    print("All grids processed successfully!")
+    # IMPORTANT: Validate the spatial index
+    print("\nValidating spatial index...")
+    if not validate_spatial_index(spatial_index, raster_info, grid):
+        print("\n⚠️  SPATIAL INDEX VALIDATION FAILED!")
+        print("Possible issues:")
+        print("1. CRS mismatch between rasters and grid")
+        print("2. Incorrect bounds format in index")
+        print("3. Rasters don't actually overlap with grid cells")
+        print("\nRun the diagnostic script to investigate further.")
+    else:
+        print("\n✓ Spatial index is working correctly!")
+        print("You can proceed with processing.")
