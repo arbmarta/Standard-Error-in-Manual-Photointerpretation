@@ -53,8 +53,6 @@ def init_worker(raster_folder):
     raster_pattern = os.path.join(raster_folder, "*.tif*")
     raster_files = glob.glob(raster_pattern)
 
-    print(f"Worker initializing: caching metadata for {len(raster_files)} rasters...")
-
     _RASTER_CACHE = []
 
     for raster_path in raster_files:
@@ -69,9 +67,6 @@ def init_worker(raster_folder):
         except Exception as e:
             logger.warning(f"Could not cache {raster_path}: {e}")
             continue
-
-    print(f"Worker initialized with {len(_RASTER_CACHE)} cached rasters")
-
 
 def get_intersecting_rasters_cached(grid_cell_geometry):
     """
