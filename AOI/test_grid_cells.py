@@ -65,11 +65,6 @@ grid_gdf = gpd.GeoDataFrame(
     crs="EPSG:3857"
 )
 
-# Save grid
-filename = f"grid_{cell_size_km}km.gpkg"
-grid_gdf.to_file(filename, driver="GPKG")
-print(f"✅ Saved {len(grid_gdf)} cells to {filename}")
-
 # Create union of all grid cells
 grid_union = grid_gdf.union_all()
 
@@ -82,7 +77,41 @@ tiles_in_grid = tiles[tiles.intersects(grid_union)]
 # Save filtered tiles
 tiles_in_grid.to_file("tiles_in_aoi_test.geojson", driver="GeoJSON")
 tiles_in_grid["tile"].to_csv("tiles_in_aoi_test.txt", index=False, header=False)
-print(f"Saved {len(tiles_in_grid)} tiles within 100km grid")
+print(f"Found {len(tiles_in_grid)} tiles within {cell_size_km}km grid")
+
+## ------------------------------------------------ ADD INTERSECTING TILES COLUMN ------------------------------------------------
+
+print(f"\nCalculating intersecting tiles for each grid cell...")
+
+def get_intersecting_tiles(cell_geom):
+    """Return comma-separated list of tile filenames that intersect this cell"""
+    intersecting = tiles_in_grid[tiles_in_grid.intersects(cell_geom)]
+    if len(intersecting) == 0:
+        return ""
+    # Return comma-separated tile filenames (e.g., "tile1.tif, tile2.tif, tile3.tif")
+    return ", ".join(intersecting["tile"].tolist())
+
+# Add intersecting_tiles column with progress bar
+grid_gdf["intersecting_tiles"] = [
+    get_intersecting_tiles(geom)
+    for geom in tqdm(grid_gdf.geometry, desc="Finding intersections")
+]
+
+# Count tiles per cell
+grid_gdf["num_tiles"] = grid_gdf["intersecting_tiles"].apply(
+    lambda x: len(x.split(", ")) if x else 0
+)
+
+print(f"✅ Added intersecting tiles column")
+print(f"   • Min tiles per cell: {grid_gdf['num_tiles'].min()}")
+print(f"   • Max tiles per cell: {grid_gdf['num_tiles'].max()}")
+print(f"   • Mean tiles per cell: {grid_gdf['num_tiles'].mean():.1f}")
+print(f"   • Cells with no tiles: {(grid_gdf['num_tiles'] == 0).sum()}")
+
+# Save grid with intersections
+filename = f"grid_{cell_size_km}km.gpkg"
+grid_gdf.to_file(filename, driver="GPKG")
+print(f"✅ Saved {len(grid_gdf)} cells with intersection data to {filename}")
 
 ## ------------------------------------------------ VISUALIZE ------------------------------------------------
 
@@ -123,3 +152,9 @@ print(f"  • Number of cells: {len(grid_gdf):,}")
 print(f"  • Cell area: {cell_size_km}×{cell_size_km} = {cell_size_km**2} km²")
 print(f"  • Total coverage: ~{len(grid_gdf) * cell_size_km**2:,} km²")
 print(f"  • Number of tiles: {len(tiles_in_grid):,}")
+print(f"\nEach grid cell now has 'intersecting_tiles' column with comma-separated tile filenames!")
+print("Example:")
+if len(grid_gdf) > 0:
+    example_tiles = grid_gdf.iloc[0]["intersecting_tiles"]
+    if example_tiles:
+        print(f"  Cell 1: {example_tiles[:100]}{'...' if len(example_tiles) > 100 else ''}")

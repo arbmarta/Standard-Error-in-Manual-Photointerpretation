@@ -8,7 +8,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 ## --------------------------------------------- DOWNLOAD META TILE INDEX ----------------------------------------------
-#region
+# region
 
 # S3 bucket and key
 bucket_name = 'dataforgood-fb-data'
@@ -45,10 +45,10 @@ print(f"Saved {len(tiles_in_aoi)} tiles in AOI to tiles_in_aoi.geojson")
 # Save list of tile IDs to text file
 tiles_in_aoi["tile"].to_csv("tiles_in_aoi.txt", index=False, header=False)
 
-#endregion
+# endregion
 
 ## ----------------------------------------------- MAP THE AOI AND TILES -----------------------------------------------
-#region
+# region
 
 fig, ax = plt.subplots(figsize=(10, 8))
 
@@ -59,30 +59,30 @@ tiles_in_aoi.boundary.plot(ax=ax, color='green', linewidth=1, label=f'Tiles ({le
 aoi_plot_gdf = gpd.GeoDataFrame([1], geometry=[aoi_geom])
 aoi_plot_gdf.boundary.plot(ax=ax, color='black', linewidth=2, label='Contiguous United States')
 
-ax.set_xticks([]) # Remove ticks
-ax.set_yticks([]) # Remove ticks
-ax.set_title("") # Remove title
-ax.set_xlabel("") # Remove axis labels
-ax.set_ylabel("") # Remove axis labels
+ax.set_xticks([])  # Remove ticks
+ax.set_yticks([])  # Remove ticks
+ax.set_title("")  # Remove title
+ax.set_xlabel("")  # Remove axis labels
+ax.set_ylabel("")  # Remove axis labels
 ax.grid(False)
 
-ax.legend(loc='lower left', frameon=False, fontsize=17) # Move legend to bottom left and remove box
+ax.legend(loc='lower left', frameon=False, fontsize=17)  # Move legend to bottom left and remove box
 
 plt.tight_layout()
 plt.savefig("Tiles in AOI.pdf", format="pdf")
 plt.show()
 
-#endregion
+# endregion
 
 ## ------------------------------------------------ GENERATE GRID CELLS ------------------------------------------------
-#region
+# region
 
 # Load AOI-filtered tiles
 tiles_in_aoi = gpd.read_file("tiles_in_aoi.geojson").to_crs(epsg=3857)
 
 # Merge all polygons to one big AOI polygon
 aoi_union = tiles_in_aoi.union_all()
-grid_sizes = [3, 24, 54] # Grid sizes in km
+grid_sizes = [3, 24, 54]  # Grid sizes in km
 
 for cell_size_km in grid_sizes:
     cell_size_m = cell_size_km * 1000
@@ -104,14 +104,43 @@ for cell_size_km in grid_sizes:
                 if aoi_union.contains(cell):
                     cells.append(cell)
 
-        grid_gdf = gpd.GeoDataFrame(geometry=cells, crs="EPSG:3857")
-
         # Create GeoDataFrame with explicit cell_id
         grid_gdf = gpd.GeoDataFrame(
-            {"cell_id": range(1, len(cells)+1)},
+            {"cell_id": range(1, len(cells) + 1)},
             geometry=cells,
             crs="EPSG:3857"
         )
+
+        # ========== ADD INTERSECTING TILES COLUMN ==========
+        print(f"Calculating intersecting tiles for {len(grid_gdf)} cells...")
+
+
+        def get_intersecting_tiles(cell_geom):
+            """Return comma-separated list of tile filenames that intersect this cell"""
+            intersecting = tiles_in_aoi[tiles_in_aoi.intersects(cell_geom)]
+            if len(intersecting) == 0:
+                return ""
+            # Return comma-separated tile filenames
+            return ", ".join(intersecting["tile"].tolist())
+
+
+        # Add intersecting_tiles column with progress bar
+        grid_gdf["intersecting_tiles"] = [
+            get_intersecting_tiles(geom)
+            for geom in tqdm(grid_gdf.geometry, desc=f"Finding intersections for {grid_label}")
+        ]
+
+        # Count tiles per cell
+        grid_gdf["num_tiles"] = grid_gdf["intersecting_tiles"].apply(
+            lambda x: len(x.split(", ")) if x else 0
+        )
+
+        print(f"✅ Intersection stats for {grid_label}:")
+        print(f"   • Min tiles per cell: {grid_gdf['num_tiles'].min()}")
+        print(f"   • Max tiles per cell: {grid_gdf['num_tiles'].max()}")
+        print(f"   • Mean tiles per cell: {grid_gdf['num_tiles'].mean():.1f}")
+        print(f"   • Cells with no tiles: {(grid_gdf['num_tiles'] == 0).sum()}")
+        # ===================================================
 
         # Save as GeoPackage
         filename = f"grid_{cell_size_km}km.gpkg"
@@ -121,7 +150,7 @@ for cell_size_km in grid_sizes:
     except Exception as e:
         print(f"❌ Error generating {grid_label} grid: {e}")
 
-#endregion
+# endregion
 
 ## ------------------------------------------------ VISUALIZE GRIDS WITH CONUS ------------------------------------------------
 
@@ -175,3 +204,5 @@ for size in grid_sizes:
     print(f"  • Cell area: {size}×{size} = {size ** 2} km²")
     print(f"  • Total coverage: ~{total_area_km2:,} km²")
     print(f"  • CRS: {grid.crs}")
+    print(f"  • Tiles per cell (mean): {grid['num_tiles'].mean():.1f}")
+    print(f"  • Tiles per cell (range): {grid['num_tiles'].min()}-{grid['num_tiles'].max()}")
